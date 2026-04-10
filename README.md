@@ -1,36 +1,26 @@
-# PIA SCRAP (API): Novelpia → EPUB
+# pia-scrap (Personal Fork)
 
-Create a clean EPUB from a Novelpia novel using Novelpia’s API. Given a `novel_id` (e.g., `49` or `47-50`), the script fetches the novel data, episode list, pulls episode data, embeds images and cover, and writes a nicely structured EPUB with metadata.
+A fork of [pia-scrap](https://github.com/bayue48/pia-scrap) by bayue48, personalised for ease of updating/maintaining novels. Refer to the original for more details and troubleshooting. Modifications from the original were made with AI assistance.
 
-> Use responsibly. Only download what your account can legitimately access. Respect Novelpia’s Terms and copyright.
+> **Provided "as is", for personal use only. Use responsibly. Do not redistribute the content. Follow Novelpia's Terms of Service and Copyright.**
 
 ---
 
 ## Features
 
-* API-based fetch (no browser automation).
-* Proper EPUB with cover, About page, per‑chapter files, ToC, NCX/Nav.
-* Preserves inline images (downloaded and embedded).
-* Handles token refresh and optional throttling to reduce rate limits.
-
----
-
-## What It Does
-
-* Authenticates against `https://api-global.novelpia.com` and stores `login_at` token + cookies in `.api.json`.
-* Calls `novel/episode/list` to collect metadata and episodes.
-* For each episode, requests a ticket, extracts the `_t` token, then fetches the episode data.
-* Normalizes HTML (images, structure), embeds images into the EPUB, adds a minimal stylesheet.
-* Adds an About page with Title, Author, Status, Source, Description, and cover when available.
+- API-based fetch (no browser automation)
+- Proper EPUB with cover, About page, per-chapter files, ToC, NCX/Nav
+- Preserves inline images (downloaded and embedded)
+- Handles token refresh and optional throttling to reduce rate limits
+- **Smart Updating** — uses a local cache to fetch only new chapters when updating, skipping novels that are already up to date entirely.
+- **Queueing** — supports downloading sequential ranges of novels automatically
 
 ---
 
 ## Requirements
 
-* Python 3.9+
-* Packages: `requests`, `beautifulsoup4`, `ebooklib`
-
-Install packages:
+- Python 3.9+
+- Packages: `requests`, `beautifulsoup4`, `ebooklib`
 
 ```bash
 pip install -r requirements.txt
@@ -40,78 +30,58 @@ pip install -r requirements.txt
 
 ## CLI
 
-```
+```bash
 python main.py NOVEL_ID [--user EMAIL] [--pass PASSWORD]
-                   [--out DIR] [--max-chapters N]
-                   [--lang en] [--proxy URL] [--throttle SECONDS]
-                   [--debug]
+               [--out DIR] [--max-chapters N]
+               [--lang en] [--proxy URL] [--throttle SECONDS]
+               [--debug] [--txt] [--update]
 ```
 
-Arguments
+### Arguments
 
-* `NOVEL_ID` (positional) — numeric/range `novel_no`, e.g. `49` or `47-50`.
-* `--user`, `--pass` — login once; tokens saved to `.api.json` for reuse.
-* `--out` — output directory (default: `output`).
-* `--max-chapters` — fetch up to N episodes (0 or unset = all).
-* `--lang` — EPUB language code (default `en`).
-* `--proxy` — HTTP/HTTPS proxy, e.g. `http://host:port`.
-* `--throttle` — seconds to wait between episode/ticket/content calls (default `2.0`).
-* `--debug` — verbose request logs and optional JSON dumps for failures.
-* `--txt` — export as txt per episode
-* `--update` — generates/accesses a local cache to update existing EPUBs without redownloading older chapters
+| Argument | Description |
+|---|---|
+| `NOVEL_ID` | Numeric or range `novel_no`, e.g. `49` or `47-50` |
+| `--user`, `--pass` | Login credentials; tokens saved to `.api.json` for reuse |
+| `--out` | Output directory (default: `output`) |
+| `--max-chapters` | Fetch up to N episodes (`0` or unset = all) |
+| `--lang` | EPUB language code (default: `en`) |
+| `--proxy` | HTTP/HTTPS proxy, e.g. `http://host:port` |
+| `--throttle` | Seconds to wait between episode/ticket/content calls (default: `2.0`) |
+| `--debug` | Verbose request logs and optional JSON dumps for failures |
+| `--txt` | Export as `.txt` per episode instead of EPUB |
+| `--update` | Generate/access a local cache to update existing EPUBs without redownloading older chapters |
 
 ---
 
 ## Quick Start
 
-1) First run with your Novelpia credentials (tokens are persisted to `.api.json`):
+**1. First run** — provide your Novelpia credentials (tokens are persisted to `.api.json`):
 
 ```bash
 python main.py 49 --user you@example.com --pass "your-password"
 ```
 
-2) Subsequent runs can reuse stored tokens (no password on the command line):
+**2. Subsequent runs** — reuse stored tokens (no password needed on the command line):
 
 ```bash
 python main.py 49
 ```
 
----
+**3. Download a range** — skip any novels that are already up to date:
 
-## Output Details
-
-Output files are written under `output/<title>/`:
-
-```
-output/<title>/<title>.epub or output/<title>/<episode-title>.txt
-```
-(If --update is used, a .raw_cache/ folder will also be generated here).
-
----
-
-## Example Session
-
-```
-[auth] Logged in as: FoggyRam2237
-[info] extracting metadata…
-[info] title='Occult Hunter of the Another World Academy' author='boratbitbam' chapter=134 status='Completed'
-[info] ticket for episode 1; Death is another beginning. …
-…
-[info] ticket for episode 134; Epilogue …
-[success] Wrote EPUB: output\occult-hunter-of-the-another-world-academy\occult-hunter-of-the-another-world-academy.epub  |  Title: Occult Hunter of the Another World Academy  |  Chapters: 134
+```bash
+python main.py 100-110 --update
 ```
 
 ---
 
-## Tips & Troubleshooting
+## Output
 
-* 401/expired token — add `--user` and `--pass` once to refresh; tokens are persisted.
-* Many 429/5xx responses — increase `--throttle` or add `--proxy`.
-* Missing images — some external hosts may block requests; those images will remain as external links.
-* HTTP debug — pass `--debug` to print masked headers/params and short body previews.
+Files are written to `output/<title>/`:
 
----
-
-## License
-
-Provided “as is”, for personal use only. Do not redistribute the content. Follow Novelpia’s Terms of Service and Copyright.
+```
+output/<title>/<title>.epub
+output/<title>/<episode-title>.txt   # if --txt is used
+output/<title>/.raw_cache/           # if --update is used
+```
