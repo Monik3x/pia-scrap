@@ -1,9 +1,10 @@
+
 import base64
 import json
 import os
 import re
-import sys
-from typing import Any, Dict, List, Optional, Tuple
+
+from typing import Any, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urljoin, urlparse
 import requests
 from src.const import BASE_URL, CONFIG_PATH, IMG_BASE_HTTPS
@@ -108,7 +109,7 @@ def _mask_value(v: Any) -> Any:
     except Exception:
         return "<masked>"
 
-def _mask_kv(d: Optional[dict]) -> Optional[dict]:
+def mask_kv(d: Optional[dict]) -> Optional[dict]:
     if not isinstance(d, dict):
         return d
     out = {}
@@ -123,7 +124,7 @@ def _mask_kv(d: Optional[dict]) -> Optional[dict]:
             out[k] = _mask_value(v)
     return out
 
-def _j(x: Any) -> str:
+def j(x: Any) -> str:
     try:
         return json.dumps(x, ensure_ascii=False)
     except Exception:
@@ -159,29 +160,6 @@ def attach_auth_cookies(session, headers=None):
             headers.setdefault("Cookie", "; ".join(cookie_parts))
 
         return headers
-
-# ----------------------------
-# Error message extraction
-# ----------------------------
-
-def _extract_errmsg_from_response(resp: Optional[requests.Response]) -> str:
-    try:
-        if resp is None:
-            return ""
-        try:
-            data = resp.json()
-            if isinstance(data, dict):
-                em = data.get("errmsg") or (
-                    isinstance(data.get("result"), dict) and data["result"].get("message")
-                ) or None
-                if isinstance(em, str) and em.strip():
-                    return em.strip()
-        except Exception:
-            pass
-        txt = getattr(resp, "text", "") or ""
-        return txt.strip()
-    except Exception:
-        return ""
 
 # ----------------------------
 # Token extraction (STRICT)
@@ -243,26 +221,3 @@ def extract_t_token(tdata: dict) -> Tuple[Optional[str], Optional[str]]:
     if fallback_token:
         return fallback_token, None
     return None, None
-
-# ----------------------------
-# Range Parsing
-# ----------------------------
-
-def parse_range(range_str: str) -> List[int]:
-    """Parses a string like '100' or '100-105' into a list of integers."""
-    range_str = str(range_str).strip()
-    if "-" in range_str:
-        try:
-            start_s, end_s = range_str.split("-", 1)
-            start = int(start_s.strip())
-            end = int(end_s.strip())
-            return list(range(start, end + 1))
-        except ValueError:
-            print(f"[error] Invalid range format: {range_str}. Use 'start-end' (e.g., 100-105).")
-            sys.exit(1)
-    else:
-        try:
-            return [int(range_str)]
-        except ValueError:
-            print(f"[error] Invalid ID: {range_str}")
-            sys.exit(1)

@@ -1,16 +1,15 @@
 import html
-import json
 import os
-import requests
+import time
 
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from ebooklib import epub
+from tqdm import tqdm
 from src.api import NovelpiaClient
 from src.const import BASE_URL
-from src.helper import ensure_dir, extract_t_token, kebab, media_type_from_ext, normalize_url
-from src.novel import html_from_episode_text
+from src.helper import ensure_dir, kebab, media_type_from_ext, normalize_url
 
 # ----------------------------
 # EPUB Builder
@@ -23,32 +22,31 @@ class EpubBuilder:
         ensure_dir(out_dir)
 
     def _fetch_bytes(self, client: NovelpiaClient, url: str) -> Optional[bytes]:
-        try:
-            resp = client.s.get(url, timeout=client.timeout)
-            resp.raise_for_status()
-            return resp.content
-        except Exception:
-            return None
+        for attempt in range(1, 4):
+            try:
+                resp = client.s.get(url, timeout=client.timeout)
+                if resp.status_code == 429:
+                    wait = 2.0 * attempt
+                    time.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                return resp.content
+            except Exception:
+                if attempt < 3:
+                    time.sleep(1.0)
+                continue
+        return None
 
     def build(self, client: NovelpiaClient, novel: Dict, episodes: List[Dict],
               filename_hint: Optional[str] = None, language: str = "en",
               author_fallback: str = "Unknown", css_text: Optional[str] = None,
-              novel_id: Optional[int] = None, update_mode: bool = False) -> Tuple[str, str, int]:
+              novel_id: Optional[int] = None) -> Tuple[str, str, int]:
         nv = novel["result"]["novel"]
         title = nv.get("novel_name", f"novel_{nv.get('novel_no','')}")
         writers = novel["result"].get("writer_list") or []
         author = (writers[0].get("writer_name") if writers and writers[0].get("writer_name") else author_fallback)
         status = "Completed" if str(nv.get("flag_complete", 0)) == "1" else "Ongoing"
         description = (nv.get("novel_story") or "").strip()
-
-        base = kebab(filename_hint or title)
-        book_dir = os.path.join(self.out_dir, base)
-        ensure_dir(book_dir)
-
-        # Setup cache directory
-        cache_dir = os.path.join(book_dir, ".raw_cache")
-        if update_mode:
-            ensure_dir(cache_dir)
 
         book = epub.EpubBook()
         book.set_identifier(f"novelpia-{nv.get('novel_no')}")
@@ -117,139 +115,24 @@ class EpubBuilder:
 
             return str(soup), added_items
 
-        for i, ep in enumerate(episodes, 1):
-            epi_no = int(ep["episode_no"])
-            epi_title = ep.get("epi_title") or f"Episode {ep.get('epi_num')}"
+        # Fetch episodes in parallel
+        pbar = tqdm(total=len(episodes), desc="Fetching chapters", unit="chap")
+        
+        def update_pbar():
+            pbar.update(1)
+
+        fetched_results = client.fetch_episodes_parallel(episodes, progress_cb=update_pbar)
+        pbar.close()
+
+        for i, res in enumerate(fetched_results, 1):
+            if not res or "error" in res:
+                err = res.get("error") if res else "Unknown error"
+                print(f"[warn] Failed to fetch chapter {i}: {err}")
+                continue
+
+            html_text = res["html"]
+            epi_title = res["epi_title"]
             
-            cdata = None
-            cache_file = os.path.join(cache_dir, f"{epi_no}.json") if update_mode else None
-
-            # Local cache check
-            if update_mode and cache_file and os.path.exists(cache_file):
-                try:
-                    with open(cache_file, "r", encoding="utf-8") as f:
-                        cdata = json.load(f)
-                    print(f"[info] loaded cached episode {i}; {epi_title}")
-                except Exception:
-                    pass
-
-            # API fetch
-            if not cdata:
-                print(f"[info] ticket for episode {i}; {epi_title} …")
-                try:
-                    tdata = client.episode_ticket(epi_no)
-                except requests.HTTPError as e:
-                    should_retry = False
-                    try:
-                        resp = getattr(e, "response", None)
-                        msg = None
-                        if resp is not None:
-                            try:
-                                body = resp.json()
-                                msg = isinstance(body, dict) and body.get("errmsg")
-                            except Exception:
-                                msg = resp.text if hasattr(resp, "text") else None
-                        if isinstance(msg, str) and "The token has expired." in msg:
-                            try:
-                                client.refresh()
-                                should_retry = True
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-                    if should_retry:
-                        try:
-                            tdata = client.episode_ticket(epi_no)
-                            print(f"[info] retry ticket for episode {i}; {epi_title} …")
-                        except requests.HTTPError as e2:
-                            print(f"[warn] episode_ticket {i}; {epi_title} failed after refresh: {e2} — skipping")
-                            continue
-                    else:
-                        print(f"[warn] episode_ticket {i}; {epi_title} failed after retries: {e} — skipping")
-                        continue
-
-                token_t, direct_url = extract_t_token(tdata)
-                if not token_t and not direct_url:
-                    print(f"[warn] no _t token for episode {i}; {epi_title} (eps_no: {epi_no}) — skipping")
-                    continue
-
-                try:
-                    if token_t:
-                        cdata = client.episode_content(token_t)
-                    else:
-                        r = client.s.get(direct_url, timeout=client.timeout)
-                        r.raise_for_status()
-                        cdata = r.json()
-                except requests.HTTPError as e:
-                    should_retry = False
-                    try:
-                        resp = getattr(e, "response", None)
-                        msg = None
-                        if resp is not None:
-                            try:
-                                body = resp.json()
-                                msg = isinstance(body, dict) and body.get("errmsg")
-                            except Exception:
-                                msg = resp.text if hasattr(resp, "text") else None
-                        if isinstance(msg, str) and "The token has expired." in msg:
-                            try:
-                                client.refresh()
-                                should_retry = True
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-                    if should_retry:
-                        try:
-                            if token_t:
-                                cdata = client.episode_content(token_t)
-                                print(f"[info] retry ticket for episode {i}; {epi_title} …")
-                            else:
-                                r = client.s.get(direct_url, timeout=client.timeout)
-                                r.raise_for_status()
-                                cdata = r.json()
-                        except requests.HTTPError as e2:
-                            print(f"[warn] content fetch failed after refresh for episode {i}; {epi_title} (eps_no: {epi_no}): {e2}")
-                            continue
-                    else:
-                        print(f"[warn] content fetch failed for episode {i}; {epi_title} (eps_no: {epi_no}: {e}")
-                        continue
-                
-                if update_mode and cdata and cache_file:
-                    try:
-                        with open(cache_file, "w", encoding="utf-8") as f:
-                            json.dump(cdata, f, ensure_ascii=False)
-                    except Exception:
-                        pass
-
-            # Prefer result.data.epi_content* fields and concatenate
-            result_block = (cdata.get("result", {}) or {})
-            data_block = (result_block.get("data") or {}) if isinstance(result_block, dict) else {}
-            parts = []
-            try:
-                # natural sort by numeric suffix, epi_content, epi_content2, epi_content3...
-                def _key(k: str):
-                    import re as _re
-                    m = _re.search(r"(\d+)$", k)
-                    return (0 if k == "epi_content" else 1, int(m.group(1)) if m else 0)
-                for k in sorted([kk for kk in data_block.keys() if str(kk).startswith("epi_content")], key=_key):
-                    v = data_block.get(k)
-                    if isinstance(v, str) and v:
-                        parts.append(v)
-            except Exception:
-                pass
-            html_text = "".join(parts).strip()
-            if not html_text:
-                # fallbacks
-                html_text = (
-                    result_block.get("content")
-                    or result_block.get("html")
-                    or result_block.get("text")
-                    or cdata.get("content")
-                    or ""
-                )
-
-            html_text = html_from_episode_text(html_text)
             html_text, new_imgs = add_images_and_rewrite(html_text)
 
             chapter = epub.EpubHtml(
@@ -294,14 +177,16 @@ class EpubBuilder:
         toc.insert(0, about)
 
         # TOC, NCX, Nav
-        book.toc = tuple(toc)
+        book.toc = toc
         book.add_item(epub.EpubNcx())
         book.add_item(epub.EpubNav())
 
         # Spine & CSS
         book.spine = spine
 
+        base = kebab(filename_hint or title)
+        book_dir = os.path.join(self.out_dir, base)
+        ensure_dir(book_dir)
         out_path = os.path.join(book_dir, f"{base}.epub")
         epub.write_epub(out_path, book, {})
-        
         return out_path, title, len(episodes)

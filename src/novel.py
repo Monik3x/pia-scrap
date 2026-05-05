@@ -1,7 +1,5 @@
-import requests
-
 from bs4 import BeautifulSoup
-from src.helper import extract_t_token, normalize_url
+from src.helper import normalize_url
 
 # ----------------------------
 # Novelpia Novel & Episodes Fetcher
@@ -34,7 +32,7 @@ def html_from_episode_text(raw_html: str) -> str:
 
     return str(soup)
 
-def fetch_novel_and_episodes(client, novel_id, max_chapters=None):
+def fetch_novel_and_episodes(client, novel_id, start_chapter=None, end_chapter=None, max_chapters=None):
     # Auth check
     try:
         res = client.me()
@@ -50,76 +48,23 @@ def fetch_novel_and_episodes(client, novel_id, max_chapters=None):
     nv = data_novel["result"]["novel"]
     title = nv.get("novel_name", f"novel_{novel_id}")
     epi_cnt = data_novel["result"].get("info", {}).get("epi_cnt") or nv.get("count_epi") or 0
+    writers = data_novel["result"].get("writer_list") or []
+    author = (writers[0].get("writer_name") if writers and writers[0].get("writer_name") else "Unknown Author")
+    status = "Completed" if str(nv.get("flag_complete", 0)) == "1" else "Ongoing"
+    
+    print(f"[info] title='{title}' author='{author}' chapter={epi_cnt} status={status}")
 
     rows = int(epi_cnt) if epi_cnt else 1000
     data_list = client.episode_list(novel_id, rows=rows)
     ep_list = data_list["result"].get("list", [])
 
+    # Handle range
+    if start_chapter:
+        ep_list = [ep for ep in ep_list if int(ep.get("epi_num", 0)) >= int(start_chapter)]
+    if end_chapter:
+        ep_list = [ep for ep in ep_list if int(ep.get("epi_num", 0)) <= int(end_chapter)]
+
     if max_chapters:
         ep_list = ep_list[:int(max_chapters)]
 
     return data_novel, ep_list, title
-
-def fetch_episode_content(client, ep, debug_dump=False, out_dir=None, idx=None):
-    epi_no = int(ep.get("episode_no"))
-    epi_title = ep.get("epi_title") or f"Episode {ep.get('epi_num')}"
-
-    print(f"[info] ticket for episode {idx}; {epi_title} …")
-
-    # --- ticket ---
-    try:
-        tdata = client.episode_ticket(epi_no)
-    except requests.HTTPError as e:
-        try:
-            client.refresh()
-            tdata = client.episode_ticket(epi_no)
-        except Exception:
-            print(f"[warn] ticket failed: {epi_title}")
-            return None, epi_title
-
-    token_t, direct_url = extract_t_token(tdata)
-    if not token_t and not direct_url:
-        return None, epi_title
-
-    # --- content ---
-    try:
-        if token_t:
-            cdata = client.episode_content(token_t)
-        else:
-            r = client.s.get(direct_url, timeout=client.timeout)
-            r.raise_for_status()
-            cdata = r.json()
-    except requests.HTTPError:
-        try:
-            client.refresh()
-            if token_t:
-                cdata = client.episode_content(token_t)
-            else:
-                r = client.s.get(direct_url, timeout=client.timeout)
-                r.raise_for_status()
-                cdata = r.json()
-        except Exception:
-            return None, epi_title
-
-    # --- extract html ---
-    result_block = cdata.get("result", {})
-    data_block = result_block.get("data", {}) if isinstance(result_block, dict) else {}
-
-    parts = []
-    for k in sorted([k for k in data_block if str(k).startswith("epi_content")]):
-        v = data_block.get(k)
-        if isinstance(v, str):
-            parts.append(v)
-
-    html_text = "".join(parts).strip()
-
-    if not html_text:
-        html_text = (
-            result_block.get("content")
-            or result_block.get("html")
-            or result_block.get("text")
-            or cdata.get("content")
-            or ""
-        )
-
-    return html_from_episode_text(html_text), epi_title
