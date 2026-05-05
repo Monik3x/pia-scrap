@@ -12,27 +12,49 @@ from src.novel import fetch_novel_and_episodes
 # Main Build Function
 # ----------------------------
 
-def build_epub(client, novel_id, out_dir, start_chapter=None, end_chapter=None, max_chapters=None, language="en", debug_dump=False):
-    data_novel, ep_list, title = fetch_novel_and_episodes(client, novel_id, start_chapter, end_chapter, max_chapters)
+def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", debug_dump=False, update_mode=False, threads=1):
+    data_novel, ep_list, title = fetch_novel_and_episodes(client, novel_id, max_chapters)
+
+    if update_mode:
+        base = kebab(title)
+        book_dir = os.path.join(out_dir, base)
+        meta_path = os.path.join(book_dir, "metadata.json")
+        
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                    existing_chapters = meta.get("chapter", 0)
+                    target_chapters = len(ep_list)
+                        
+                    if existing_chapters >= target_chapters and target_chapters > 0:
+                        print(f"[info] '{title}' is already up to date ({existing_chapters} chapters). Skipping API fetch.")
+                        return None, title, existing_chapters
+            except Exception:
+                pass
 
     builder = EpubBuilder(out_dir, debug_dump=debug_dump)
-
-    base = kebab(title)
-    book_dir = os.path.join(out_dir, base)
-    ensure_dir(book_dir)
-    build_metadata(book_dir, data_novel, novel_id, ep_list, max_chapters)   
-
-    return builder.build(
+    out_file, title, count = builder.build(
         client=client,
+        threads=threads,
         novel=data_novel,
         episodes=ep_list,
         filename_hint=title,
         language=language,
         novel_id=novel_id,
+        update_mode=update_mode
     )
 
-def build_txt(client, novel_id, out_dir, start_chapter=None, end_chapter=None, max_chapters=None, language="en", debug_dump=False):
-    data_novel, ep_list, title = fetch_novel_and_episodes(client, novel_id, start_chapter, end_chapter, max_chapters)
+    # Move this specifically here so it doesn't write if build fails
+    base = kebab(title)
+    book_dir = os.path.join(out_dir, base)
+    ensure_dir(book_dir)
+    build_metadata(book_dir, data_novel, novel_id, ep_list, max_chapters)   
+
+    return out_file, title, count
+
+def build_txt(client, novel_id, out_dir, max_chapters=None, language="en", debug_dump=False, threads=1):
+    data_novel, ep_list, title = fetch_novel_and_episodes(client, novel_id, max_chapters)
 
     base = kebab(title)
     book_dir = os.path.join(out_dir, base)
@@ -44,7 +66,7 @@ def build_txt(client, novel_id, out_dir, start_chapter=None, end_chapter=None, m
     def update_pbar():
         pbar.update(1)
 
-    fetched_results = client.fetch_episodes_parallel(ep_list, progress_cb=update_pbar)
+    fetched_results = client.fetch_episodes_parallel(ep_list, max_workers=threads, progress_cb=update_pbar)
     pbar.close()
 
     for i, res in enumerate(fetched_results, 1):
@@ -65,6 +87,7 @@ def build_txt(client, novel_id, out_dir, start_chapter=None, end_chapter=None, m
 
         total += 1
     
+    # Run only at the end
     build_metadata(book_dir, data_novel, novel_id, ep_list, max_chapters)
 
     return book_dir, title, total
@@ -90,6 +113,7 @@ def build_metadata(book_dir, data_novel, novel_id, ep_list, max_chapters=None):
             val = t.get("tag_name") or t.get("name") or t.get("title")
             if isinstance(val, str):
                 tags.append(val)
+
     # unique while preserving order
     seen = set()
     uniq_tags = []

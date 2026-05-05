@@ -1,6 +1,8 @@
 import html
 import os
+import json
 import time
+import requests
 
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -19,34 +21,79 @@ class EpubBuilder:
     def __init__(self, out_dir: str, debug_dump: bool = False):
         self.out_dir = out_dir
         self.debug_dump = debug_dump
+        self._pinged_referers = set()
         ensure_dir(out_dir)
 
-    def _fetch_bytes(self, client: NovelpiaClient, url: str) -> Optional[bytes]:
+    def _fetch_bytes(self, client: NovelpiaClient, url: str, referer_url: str) -> Optional[bytes]:
+        # 1. Ping the official viewer page in the background to grab missing CloudFront cookies
+        if referer_url and referer_url not in self._pinged_referers:
+            try:
+                # We do a quick GET to let Amazon WAF set the CloudFront cookies into the session
+                client.s.get(referer_url, headers={"User-Agent": client.s.headers.get("User-Agent", "Mozilla/5.0")}, timeout=client.timeout)
+                self._pinged_referers.add(referer_url)
+            except Exception:
+                pass
+
+        last_error = "Unknown Error"
         for attempt in range(1, 4):
             try:
-                resp = client.s.get(url, timeout=client.timeout)
+                # 2. Spoof the referer to prove we came from the reader
+                # And inject exact browser headers to pass the strict AWS WAF checks
+                headers = {
+                    "Referer": referer_url,
+                    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                    "Sec-Fetch-Dest": "image",
+                    "Sec-Fetch-Mode": "no-cors",
+                    "Sec-Fetch-Site": "same-site"
+                }
+                
+                # 3. Force ALL cookies (including the CloudFront keys we just grabbed) into the header. 
+                # This bypasses the strict sub-domain isolation blocking our downloads.
+                cookie_str = "; ".join([f"{c.name}={c.value}" for c in client.s.cookies])
+                if cookie_str:
+                    headers["Cookie"] = cookie_str
+                    
+                resp = client.s.get(url, headers=headers, timeout=client.timeout)
+                
                 if resp.status_code == 429:
-                    wait = 2.0 * attempt
-                    time.sleep(wait)
+                    last_error = "HTTP 429 (Too Many Requests)"
+                    time.sleep(2.0 * attempt)
                     continue
+                    
                 resp.raise_for_status()
                 return resp.content
-            except Exception:
-                if attempt < 3:
-                    time.sleep(1.0)
-                continue
+                
+            except requests.exceptions.HTTPError as e:
+                last_error = f"HTTP {e.response.status_code}"
+                if e.response.status_code in (403, 404):
+                    break # CloudFront won't change its mind on retries
+                if attempt < 3: time.sleep(1.0)
+            except requests.exceptions.RequestException as e:
+                last_error = type(e).__name__
+                if attempt < 3: time.sleep(1.0)
+                
+        print(f"[warn] Image error ({last_error}): {url}")
         return None
 
     def build(self, client: NovelpiaClient, novel: Dict, episodes: List[Dict],
               filename_hint: Optional[str] = None, language: str = "en",
               author_fallback: str = "Unknown", css_text: Optional[str] = None,
-              novel_id: Optional[int] = None) -> Tuple[str, str, int]:
+              novel_id: Optional[int] = None, update_mode: bool = False, threads: int = 1) -> Tuple[str, str, int]:
         nv = novel["result"]["novel"]
         title = nv.get("novel_name", f"novel_{nv.get('novel_no','')}")
-        writers = novel["result"].get("writer_list") or []
+        writers = novel["result"].get("writer_list") or[]
         author = (writers[0].get("writer_name") if writers and writers[0].get("writer_name") else author_fallback)
         status = "Completed" if str(nv.get("flag_complete", 0)) == "1" else "Ongoing"
         description = (nv.get("novel_story") or "").strip()
+
+        base = kebab(filename_hint or title)
+        book_dir = os.path.join(self.out_dir, base)
+        ensure_dir(book_dir)
+
+        # --- Setup Cache Directory ---
+        cache_dir = os.path.join(book_dir, ".raw_cache")
+        if update_mode:
+            ensure_dir(cache_dir)
 
         book = epub.EpubBook()
         book.set_identifier(f"novelpia-{nv.get('novel_no')}")
@@ -56,7 +103,8 @@ class EpubBuilder:
 
         # Cover
         cover_url = normalize_url(nv.get("novel_full_img") or nv.get("novel_img") or "")
-        cover_bytes = self._fetch_bytes(client, cover_url) if cover_url else None
+        novel_referer = f"https://global.novelpia.com/novel/{novel_id}" if novel_id else "https://global.novelpia.com/"
+        cover_bytes = self._fetch_bytes(client, cover_url, referer_url=novel_referer) if cover_url else None
         has_cover = False
         if cover_bytes:
             book.set_cover("cover.jpg", cover_bytes)
@@ -80,10 +128,13 @@ class EpubBuilder:
         image_cache: Dict[str, str] = {}
         img_index = 1
 
-        def add_images_and_rewrite(html_str: str) -> Tuple[str, List[epub.EpubItem]]:
+        def add_images_and_rewrite(html_str: str, epi_no: str) -> Tuple[str, List[epub.EpubItem]]:
             nonlocal img_index
             soup = BeautifulSoup(html_str, "html.parser")
-            added_items: List[epub.EpubItem] = []
+            added_items: List[epub.EpubItem] =[]
+            
+            # Construct the exact URL a real user would be on when reading this chapter
+            viewer_url = f"https://global.novelpia.com/viewer/{novel_id}/{epi_no}" if novel_id else "https://global.novelpia.com/"
 
             for img in soup.find_all("img"):
                 src = img.get("src")
@@ -99,9 +150,8 @@ class EpubBuilder:
                 if ext not in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
                     ext = ".jpg"
 
-                img_bytes = self._fetch_bytes(client, src)
+                img_bytes = self._fetch_bytes(client, src, referer_url=viewer_url)
                 if not img_bytes:
-                    # leave external
                     continue
 
                 fname = f"images/img_{img_index:05d}{ext}"
@@ -115,16 +165,62 @@ class EpubBuilder:
 
             return str(soup), added_items
 
-        # Fetch episodes in parallel
-        pbar = tqdm(total=len(episodes), desc="Fetching chapters", unit="chap")
-        
-        def update_pbar():
-            pbar.update(1)
+        # --- Cache Filter ---
+        all_results = [None] * len(episodes)
+        to_fetch = []
+        fetch_indices =[]
 
-        fetched_results = client.fetch_episodes_parallel(episodes, progress_cb=update_pbar)
-        pbar.close()
+        for idx_offset, ep in enumerate(episodes):
+            epi_no = int(ep["episode_no"])
+            cache_file = os.path.join(cache_dir, f"{epi_no}.json") if update_mode else None
+            
+            cached_data = None
+            if update_mode and cache_file and os.path.exists(cache_file):
+                try:
+                    with open(cache_file, "r", encoding="utf-8") as f:
+                        cached_data = json.load(f)
+                except Exception:
+                    pass
+            
+            if cached_data:
+                all_results[idx_offset] = cached_data
+            else:
+                to_fetch.append(ep)
+                fetch_indices.append(idx_offset)
 
-        for i, res in enumerate(fetched_results, 1):
+        # Let the user know the cache worked!
+        cached_count = len(episodes) - len(to_fetch)
+        if cached_count > 0:
+            print(f"[info] Successfully loaded {cached_count} chapters instantly from local cache.")
+
+        # Callback to write cache instantly when a thread returns
+        def cache_result(res):
+            if update_mode and res and "error" not in res:
+                epi_no = res.get("epi_no")
+                if epi_no:
+                    c_file = os.path.join(cache_dir, f"{epi_no}.json")
+                    try:
+                        with open(c_file, "w", encoding="utf-8") as f:
+                            json.dump(res, f, ensure_ascii=False)
+                    except Exception:
+                        pass
+
+        # --- Parallel Fetching ---
+        if to_fetch:
+            pbar = tqdm(total=len(to_fetch), desc="Fetching chapters", unit="chap")
+            def update_pbar():
+                pbar.update(1)
+
+            # Max workers clamped to 2 to respect Novelpia's strict rate limits
+            fetched = client.fetch_episodes_parallel(to_fetch, max_workers=threads, progress_cb=update_pbar, on_complete_cb=cache_result)
+            pbar.close()
+
+            for i, res in enumerate(fetched):
+                orig_idx = fetch_indices[i]
+                all_results[orig_idx] = res
+
+        # --- Processing Results ---
+        for i, res in enumerate(all_results, 1):
             if not res or "error" in res:
                 err = res.get("error") if res else "Unknown error"
                 print(f"[warn] Failed to fetch chapter {i}: {err}")
@@ -133,7 +229,10 @@ class EpubBuilder:
             html_text = res["html"]
             epi_title = res["epi_title"]
             
-            html_text, new_imgs = add_images_and_rewrite(html_text)
+            # Fetch the actual episode number out of the result or fallback gracefully
+            current_epi_no = str(res.get("epi_no", episodes[i-1].get("episode_no", str(i))))
+            
+            html_text, new_imgs = add_images_and_rewrite(html_text, epi_no=current_epi_no)
 
             chapter = epub.EpubHtml(
                 title=epi_title,
@@ -184,9 +283,6 @@ class EpubBuilder:
         # Spine & CSS
         book.spine = spine
 
-        base = kebab(filename_hint or title)
-        book_dir = os.path.join(self.out_dir, base)
-        ensure_dir(book_dir)
         out_path = os.path.join(book_dir, f"{base}.epub")
         epub.write_epub(out_path, book, {})
         return out_path, title, len(episodes)

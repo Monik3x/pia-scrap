@@ -10,7 +10,7 @@ import re as _re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from src import const
-from src.helper import j, mask_kv, attach_auth_cookies, merge_login_at
+from src.helper import _j, _mask_kv, attach_auth_cookies, merge_login_at
 from src.helper import extract_t_token
 from src.novel import html_from_episode_text
 
@@ -91,16 +91,14 @@ class NovelpiaClient:
             cfg["login_at"] = self.tokens.login_at
             with open(const.CONFIG_PATH, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
-                pass
         except Exception as e:
             print(f"Error saving config: {e}")
             pass
         return self.tokens.login_at
 
     def _on_rate_limit(self):
-        """Increase throttle when 429 occurs."""
         old = self.throttle
-        self.throttle = min(15.0, self.throttle + 1.5)
+        self.throttle = min(5.0, self.throttle + 0.5) # Reduced harsh penalty
         if const.HTTP_LOG:
             print(f"[api] Increased throttle from {old}s to {self.throttle}s due to rate limit.")
 
@@ -146,9 +144,8 @@ class NovelpiaClient:
         url = f"{const.API_BASE}/v1/novel/episode"
         headers = merge_login_at({}, self.tokens.login_at)
         params = {"episode_no": episode_no}
-        # Throttle before hitting ticket endpoint to avoid rate limits
         if self.throttle:
-            time.sleep(self.throttle + random.uniform(1.0, 1.5))
+            time.sleep(random.uniform(self.throttle * 0.5, self.throttle))
         r = request_with_retries(
             self.s, "GET", url,
             headers=headers, params=params,
@@ -161,9 +158,8 @@ class NovelpiaClient:
 
     def episode_content(self, token_t: str) -> Dict:
         url = f"{const.API_BASE}/v1/novel/episode/content"
-        # Throttle content fetch too, to be safe
         if self.throttle:
-            time.sleep(self.throttle + random.uniform(1.0, 1.5))
+            time.sleep(random.uniform(self.throttle * 0.5, self.throttle))
         r = request_with_retries(
             self.s, "GET", url,
             params={"_t": token_t},
@@ -175,7 +171,9 @@ class NovelpiaClient:
         return r.json()
 
     def fetch_episode(self, ep: Dict, idx: int = 0) -> Dict:
-        """Fetch ticket and content for a single episode."""
+        # Micro-staggering to prevent Thundering Herd on thread launch
+        time.sleep(random.uniform(0.1, 0.6))
+        
         episode_no = ep.get("episode_no")
         if episode_no is None:
             return {
@@ -242,23 +240,31 @@ class NovelpiaClient:
             "idx": idx,
         }
 
-    def fetch_episodes_parallel(self, ep_list: List[Dict[str, Any]], max_workers: int = 3, progress_cb=None) -> List[Dict[str, Any]]:
-        """Fetch multiple episodes in parallel."""
+    def fetch_episodes_parallel(self, ep_list: List[Dict[str, Any]], max_workers: int = 2, progress_cb=None, on_complete_cb=None) -> List[Dict[str, Any]]:
         results: List[Dict[str, Any]] = [{} for _ in range(len(ep_list))]
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_idx = {
                 executor.submit(self.fetch_episode, ep, i+1): i 
                 for i, ep in enumerate(ep_list)
             }
-            for future in concurrent.futures.as_completed(future_to_idx):
-                idx = future_to_idx[future]
-                try:
-                    res = future.result()
-                    results[idx] = res
-                except Exception as e:
-                    results[idx] = {"error": str(e), "idx": idx+1}
-                if progress_cb:
-                    progress_cb()
+            try:
+                for future in concurrent.futures.as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    try:
+                        res = future.result()
+                        results[idx] = res
+                    except Exception as e:
+                        results[idx] = {"error": str(e), "idx": idx+1}
+                    
+                    if on_complete_cb:
+                        on_complete_cb(results[idx])
+                    if progress_cb:
+                        progress_cb()
+            except KeyboardInterrupt:
+                print("\n[warn] KeyboardInterrupt detected. Safely stopping threads...")
+                # cancel_futures added in python 3.9 stops pending tasks cleanly
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
         return results
 
 def request_with_retries(session: requests.Session, method: str, url: str, *,
@@ -285,47 +291,19 @@ def request_with_retries(session: requests.Session, method: str, url: str, *,
                 print(f"Error occurred while attaching auth cookies: {e}")
                 pass
 
-            if const.HTTP_LOG:
-                print(f"[api]   -> {method} {url} (attempt {attempt}/{max_retries})")
-                try:
-                    eff_headers = {}
-                    try:
-                        eff_headers.update(getattr(session, "headers", {}) or {})
-                    except Exception as e:
-                        print(f"Error occurred while fetching session headers: {e}")
-                        pass
-                    if headers:
-                        eff_headers.update(headers)
-                except Exception as e:
-                    print(f"[api]   req-headers: <unavailable> ({e})")
-                if params:
-                    print(f"[api]   params:  {j(mask_kv(params))}")
-                if json is not None:
-                    print(f"[api]   json:    {j(mask_kv(json))}")
-
             r = session.request(method, url, headers=headers, params=params, json=json, data=data, timeout=timeout)
-
-            if const.HTTP_LOG and r.status_code != 200:
-                print(f"[api]   <- {r.status_code} {r.reason} from {r.url}")
-                print(f"[api]   <- Response content: {r.text}")
             
-            # Handle rate limiting (429)
             if r.status_code == 429:
                 if on_rate_limit:
                     on_rate_limit()
                 wait = max(5.0, backoff ** (attempt + 2)) + random.uniform(0.5, 1.5)
-                if const.HTTP_LOG:
-                    print(f"[api] !! Rate limit (429) hit. Waiting {wait:.1f}s...")
                 time.sleep(wait)
                 continue
 
-            # Handle too many requests or server errors (5xx)
             if r.status_code >= 500:
                 if on_rate_limit:
                     on_rate_limit()
                 wait = max(5.0, backoff ** (attempt + 2)) + random.uniform(0.5, 1.5)
-                if const.HTTP_LOG:
-                    print(f"[api] !! Server error ({r.status_code}). Retrying after backoff...")
                 time.sleep(wait)
                 continue
 
@@ -349,31 +327,31 @@ def request_with_retries(session: requests.Session, method: str, url: str, *,
                         success = False
                         # Try refresh first
                         if refresh_fn and not did_refresh:
-                            if const.HTTP_LOG: print("[api] Session expired, trying refresh...")
                             try:
                                 refresh_fn()
                                 did_refresh = True
                                 success = True
                             except Exception:
                                 if const.HTTP_LOG: print("[api] Refresh failed.")
+                                pass
                         
-                        # Try full login if refresh failed or not available
                         if not success and login_fn and not did_login:
-                            if const.HTTP_LOG: print("[api] Refresh failed or unavailable, trying full re-login...")
                             try:
                                 login_fn()
                                 did_login = True
                                 success = True
                             except Exception as e:
                                 if const.HTTP_LOG: print(f"[api] Re-login failed: {e}")
+                                pass
 
                         if success:
                             # Retry original request once
                             r = session.request(method, url, headers=headers, params=params, json=json, data=data, timeout=timeout)
                     except Exception as e:
                         if const.HTTP_LOG: print(f"[api] Auth recovery failed: {e}")
+                        pass
 
-            if r.json and r.status_code >= 500 and attempt < max_retries:
+            if r.status_code >= 500 and attempt < max_retries:
                 time.sleep(backoff ** attempt)
                 continue
             return r

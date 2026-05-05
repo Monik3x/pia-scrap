@@ -1,10 +1,9 @@
-
 import base64
 import json
 import os
 import re
-
-from typing import Any, Dict, Optional, Tuple
+import sys
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urljoin, urlparse
 import requests
 from src.const import BASE_URL, CONFIG_PATH, IMG_BASE_HTTPS
@@ -98,7 +97,6 @@ def _mask_value(v: Any) -> Any:
             return [_mask_value(x) for x in v]
         if isinstance(v, str):
             low = v.lower()
-            # Mask long tokens / JWT-like
             if low.count(".") == 2 and all(len(p) > 5 for p in v.split(".")):
                 parts = v.split(".")
                 return parts[0][:6] + "..." + parts[-1][-6:]
@@ -109,7 +107,7 @@ def _mask_value(v: Any) -> Any:
     except Exception:
         return "<masked>"
 
-def mask_kv(d: Optional[dict]) -> Optional[dict]:
+def _mask_kv(d: Optional[dict]) -> Optional[dict]:
     if not isinstance(d, dict):
         return d
     out = {}
@@ -124,7 +122,7 @@ def mask_kv(d: Optional[dict]) -> Optional[dict]:
             out[k] = _mask_value(v)
     return out
 
-def j(x: Any) -> str:
+def _j(x: Any) -> str:
     try:
         return json.dumps(x, ensure_ascii=False)
     except Exception:
@@ -221,3 +219,40 @@ def extract_t_token(tdata: dict) -> Tuple[Optional[str], Optional[str]]:
     if fallback_token:
         return fallback_token, None
     return None, None
+
+# ----------------------------
+# Advanced Range Parsing
+# ----------------------------
+
+def parse_range(range_str: str) -> List[int]:
+    """Parses mixed strings like '100', '100-105', or '47,50,51-55' into a list of integers."""
+    result = []
+    
+    # Split by commas first
+    parts = str(range_str).strip().split(',')
+    
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+            
+        if "-" in part:
+            try:
+                start_s, end_s = part.split("-", 1)
+                start = int(start_s.strip())
+                end = int(end_s.strip())
+                # Add all numbers in the range (inclusive)
+                result.extend(range(start, end + 1))
+            except ValueError:
+                print(f"[error] Invalid range format: {part}. Use 'start-end' (e.g., 100-105).")
+                sys.exit(1)
+        else:
+            try:
+                result.append(int(part))
+            except ValueError:
+                print(f"[error] Invalid ID: {part}")
+                sys.exit(1)
+                
+    # Remove duplicates while preserving the order they were entered
+    seen = set()
+    return [x for x in result if not (x in seen or seen.add(x))]

@@ -17,7 +17,7 @@ from src import const
 def main():
     load_dotenv()
     ap = argparse.ArgumentParser(description="Novelpia → EPUB packer (API)")
-    ap.add_argument("novel_ids", help="Novel ID (e.g. 1072) or Range (e.g. 1000-1050)")
+    ap.add_argument("novel_ids", help="Novel ID (e.g. 1072) or Range (e.g. 1000-1050) or mixed strings (47,49,51-55)")
     ap.add_argument("--user", "--email", "-u", "-e", dest="email", help="Novelpia email (overrides config tokens if provided)")
     ap.add_argument("--pass", "--password", "-p", dest="password", help="Novelpia password (overrides config tokens if provided)")
     ap.add_argument("--out", default="output", help="Output directory")
@@ -25,9 +25,10 @@ def main():
     ap.add_argument("--lang", default="en", help="EPUB language code (default: en)")
     ap.add_argument("--proxy", default=None, help="HTTP/HTTPS proxy, e.g. http://host:port")
     ap.add_argument("--debug", "-v", action="store_true", help="Enable verbose HTTP request/response logs and extra diagnostics")
-    ap.add_argument("--throttle", type=float, default=2.0, help="Seconds delay between episode requests (default: 2.0)")
+    ap.add_argument("--throttle", type=float, default=1.5, help="Seconds delay between episode requests (default: 2.0)")
     ap.add_argument("--txt", "-txt", action="store_true", help="Output plain .txt files per episode instead of EPUB")
     ap.add_argument("--update", action="store_true", help="Only download new chapters and update existing EPUB via local cache")
+    ap.add_argument("--threads", type=int, default=1, help="Number of workers sending requests (default: 1), recommended to leave as is")
     args = ap.parse_args()
 
     const.HTTP_LOG = bool(args.debug)
@@ -83,6 +84,7 @@ def main():
                     client, novel_id, args.out,
                     max_chapters=(args.max_chapters if args.max_chapters and args.max_chapters > 0 else None),
                     language=args.lang, debug_dump=args.debug,
+                    threads=args.threads
                 )
                 print(f"[success] Wrote TXT files under: {out_dir_final}  |  Title: {title}  |  Chapters: {count}")
                 success_count += 1
@@ -91,7 +93,8 @@ def main():
                     client, novel_id, args.out,
                     max_chapters=(args.max_chapters if args.max_chapters and args.max_chapters > 0 else None),
                     language=args.lang, debug_dump=args.debug,
-                    update_mode=args.update
+                    update_mode=args.update,
+                    threads=args.threads
                 )
                 
                 if out_file is None:

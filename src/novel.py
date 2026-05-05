@@ -8,7 +8,6 @@ from src.helper import normalize_url
 def html_from_episode_text(raw_html: str) -> str:
     soup = BeautifulSoup(raw_html or "", "html.parser")
 
-    # normalize images
     for img in soup.find_all("img"):
         if img.get("data-src") and not img.get("src"):
             img["src"] = img["data-src"]
@@ -17,20 +16,8 @@ def html_from_episode_text(raw_html: str) -> str:
         if img.get("src"):
             img["src"] = normalize_url(img["src"])
 
-    # Ensure document wrapper
-    if not soup.find("html"):
-        html_tag = soup.new_tag("html")
-        head = soup.new_tag("head")
-        meta = soup.new_tag("meta", charset="utf-8")
-        head.append(meta)
-        body = soup.new_tag("body")
-        for el in list(soup.children):
-            body.append(el.extract())
-        html_tag.append(head)
-        html_tag.append(body)
-        soup.append(html_tag)
-
-    return str(soup)
+    # Return just the clean inner HTML, without forcing an <html> wrapper
+    return "".join(str(tag) for tag in soup.contents)
 
 def fetch_novel_and_episodes(client, novel_id, start_chapter=None, end_chapter=None, max_chapters=None):
     # Auth check
