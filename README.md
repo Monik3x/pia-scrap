@@ -6,21 +6,20 @@ A fork of [pia-scrap](https://github.com/bayue48/pia-scrap) by bayue48, personal
 
 ---
 
-## Features
+## New Features
 
-- API-based fetch (no browser automation)
-- Proper EPUB with cover, About page, per-chapter files, ToC, NCX/Nav
-- Preserves inline images (downloaded and embedded)
-- Handles token refresh and optional throttling to reduce rate limits
 - **Smart Updating** — uses a local cache to fetch only new chapters when updating, skipping novels that are already up to date entirely.
 - **Queueing** — supports downloading sequential ranges of novels automatically
+- **Improved threading** - added thread stagger, implemented safe KeyboardInterrupt thread cancellation, reduced aggressive throttle penalty 
 
 ---
+
+
 
 ## Requirements
 
 - Python 3.9+
-- Packages: `requests`, `beautifulsoup4`, `ebooklib`
+- Packages: `requests`, `beautifulsoup4`, `ebooklib`, `tqdm`, `python-dotenv`
 
 ```bash
 pip install -r requirements.txt
@@ -34,14 +33,14 @@ pip install -r requirements.txt
 python main.py NOVEL_ID [--user EMAIL] [--pass PASSWORD]
                [--out DIR] [--max-chapters N]
                [--lang en] [--proxy URL] [--throttle SECONDS]
-               [--debug] [--txt] [--update]
+               [--debug] [--txt] [--update] [--threads]
 ```
 
 ### Arguments
 
 | Argument | Description |
 |---|---|
-| `NOVEL_ID` | Numeric or range `novel_no`, e.g. `49` or `47-50` |
+| `NOVEL_ID` | Mixed numeric or range `novel_no`, e.g. `49` or `40,47-50` |
 | `--user`, `--pass` | Login credentials; tokens saved to `.api.json` for reuse |
 | `--out` | Output directory (default: `output`) |
 | `--max-chapters` | Fetch up to N episodes (`0` or unset = all) |
@@ -50,7 +49,7 @@ python main.py NOVEL_ID [--user EMAIL] [--pass PASSWORD]
 | `--throttle` | Seconds to wait between episode/ticket/content calls (default: `2.0`) |
 | `--debug` | Verbose request logs and optional JSON dumps for failures |
 | `--txt` | Export as `.txt` per episode instead of EPUB |
-| `--update` | Generate/access a local cache to update existing EPUBs without redownloading older chapters |
+| `--update` | Generate/access a local cache to update existing EPUBs without redownloading older chapters | `--threads` | Number of workers sending requests, recommended to leave as is (default: `1`) |
 
 ---
 
@@ -71,7 +70,7 @@ python main.py 49
 **3. Download a range** — skip any novels that are already up to date:
 
 ```bash
-python main.py 100-110 --update
+python main.py 95,100-110 --update
 ```
 
 ---
@@ -85,3 +84,12 @@ output/<title>/<title>.epub
 output/<title>/<episode-title>.txt   # if --txt is used
 output/<title>/.raw_cache/           # if --update is used
 ```
+---
+
+## Quick Notes
+
+Parallel fetching (multithreading) is pretty much fundementally incompatible with Novelpia's API. It has a low threshold concerning rate limits and requests per second. Even with stagger it will immediately throw out a HTTP 429 (Too Many Requests) error. Parallel downloading only works if the server allows high concurrency. Therefore, 99% of the time, **it's slower than sending requests sequentially**. Don't ask me why it's there.
+
+Image scraping is improved over the original but still can't beat AWS WAF and CloudFront.
+
+Also the max-chapters flag doesn't work.
