@@ -50,7 +50,8 @@ python main.py NOVEL_ID [--user EMAIL] [--pass PASSWORD]
 | `--throttle` | Seconds to wait between episode/ticket/content calls (default: `2.0`) |
 | `--debug` | Verbose request logs and optional JSON dumps for failures |
 | `--txt` | Export as `.txt` per episode instead of EPUB |
-| `--update` | Generate/access a local cache to update existing EPUBs without redownloading older chapters | `--threads` | Number of workers sending requests, recommended to leave as is (default: `1`) |
+| `--update` | Generate/access a local cache to update existing EPUBs without redownloading older chapters | 
+| `--threads` | Number of workers sending requests, recommended to leave as is (default: `1`) |
 
 ---
 
