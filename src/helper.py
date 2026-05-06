@@ -137,11 +137,8 @@ def attach_auth_cookies(session, headers=None):
         tval = None
 
         try:
-            for c in ck:
-                if c.name == "USERKEY":
-                    uval = c.value
-                elif c.name == "TKEY":
-                    tval = c.value
+            uval = ck.get("USERKEY")
+            tval = ck.get("TKEY")
         except Exception as e:
             print(f"Error occurred while fetching cookies: {e}")
 

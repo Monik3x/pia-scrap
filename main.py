@@ -2,7 +2,7 @@ import argparse
 import sys
 import os
 import time
-import requests
+from curl_cffi import requests
 
 from dotenv import load_dotenv
 from src.api import NovelpiaClient
@@ -51,11 +51,8 @@ def main():
         userkey_val = None
         tkey_val = None
         try:
-            for c in client.s.cookies:
-                if c.name == "USERKEY":
-                    userkey_val = c.value
-                elif c.name == "TKEY":
-                    tkey_val = c.value
+            userkey_val = client.s.cookies.get("USERKEY")
+            tkey_val = client.s.cookies.get("TKEY")
         except Exception as e:
             print(f"Error occurred while fetching cookies: {e}")
             pass
@@ -107,7 +104,7 @@ def main():
             err_str = str(e)
             if "NoneType" in err_str or "KeyError" in err_str:
                 print(f"[-] Novel {novel_id} likely does not exist or has no data. Skipping.")
-            elif isinstance(e, requests.HTTPError) and e.response.status_code == 404:
+            elif hasattr(e, "response") and e.response and e.response.status_code == 404:
                 print(f"[-] Novel {novel_id} returned 404. Skipping.")
             else:
                 print(f"[error] Failed processing {novel_id}: {e}")

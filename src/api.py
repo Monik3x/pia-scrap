@@ -3,7 +3,7 @@ import os
 import random
 import time
 import uuid
-import requests
+from curl_cffi import requests
 import concurrent.futures
 import re as _re
 
@@ -28,7 +28,7 @@ class NovelpiaClient:
     def __init__(self, email: Optional[str] = None, password: Optional[str] = None,
                  proxy: Optional[str] = None, timeout: int = 30, throttle: float = 1.5,
                  userkey: Optional[str] = None, tkey: Optional[str] = None):
-        self.s = requests.Session()
+        self.s = requests.Session(impersonate="chrome110")
         self.s.headers.update(const.SESSION_HEADERS.copy())
         if proxy:
             self.s.proxies.update({"http": proxy, "https": proxy})
@@ -61,11 +61,8 @@ class NovelpiaClient:
         self.tokens.login_at = data["result"]["LOGINAT"]
         # Capture cookies after successful login
         try:
-            for c in self.s.cookies:
-                if c.name == "TKEY":
-                    self.tokens.tkey = c.value
-                elif c.name == "USERKEY":
-                    self.tokens.userkey = c.value
+            self.tokens.tkey = self.s.cookies.get("TKEY")
+            self.tokens.userkey = self.s.cookies.get("USERKEY")
         except Exception:
             pass
 
@@ -192,6 +189,10 @@ class NovelpiaClient:
             return {"error": str(e), "epi_no": epi_no, "epi_title": epi_title, "idx": idx}
 
         token_t, direct_url = extract_t_token(tdata)
+
+        # ---> NEW: Grab the CloudFront cookies from the JSON <---
+        signed_key = tdata.get("result", {}).get("signed_key", {})
+
         if not token_t and not direct_url:
             return {"error": "no token found", "epi_no": epi_no, "epi_title": epi_title, "idx": idx}
 
@@ -238,6 +239,7 @@ class NovelpiaClient:
             "epi_title": epi_title,
             "epi_no": epi_no,
             "idx": idx,
+            "signed_key": signed_key, # ---> NEW: Return the keys <---
         }
 
     def fetch_episodes_parallel(self, ep_list: List[Dict[str, Any]], max_workers: int = 2, progress_cb=None, on_complete_cb=None) -> List[Dict[str, Any]]:

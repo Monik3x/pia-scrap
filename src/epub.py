@@ -2,7 +2,7 @@ import html
 import os
 import json
 import time
-import requests
+from curl_cffi import requests
 
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -24,32 +24,25 @@ class EpubBuilder:
         self._pinged_referers = set()
         ensure_dir(out_dir)
 
-    def _fetch_bytes(self, client: NovelpiaClient, url: str, referer_url: str) -> Optional[bytes]:
-        # 1. Ping the official viewer page in the background to grab missing CloudFront cookies
-        if referer_url and referer_url not in self._pinged_referers:
-            try:
-                # We do a quick GET to let Amazon WAF set the CloudFront cookies into the session
-                client.s.get(referer_url, headers={"User-Agent": client.s.headers.get("User-Agent", "Mozilla/5.0")}, timeout=client.timeout)
-                self._pinged_referers.add(referer_url)
-            except Exception:
-                pass
-
+    def _fetch_bytes(self, client: NovelpiaClient, url: str, referer_url: str, episode_cookies: dict = None) -> Optional[bytes]:
         last_error = "Unknown Error"
         for attempt in range(1, 4):
             try:
-                # 2. Spoof the referer to prove we came from the reader
-                # And inject exact browser headers to pass the strict AWS WAF checks
                 headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
                     "Referer": referer_url,
                     "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
                     "Sec-Fetch-Dest": "image",
                     "Sec-Fetch-Mode": "no-cors",
-                    "Sec-Fetch-Site": "same-site"
+                    "Sec-Fetch-Site": "cross-site",
                 }
                 
-                # 3. Force ALL cookies (including the CloudFront keys we just grabbed) into the header. 
-                # This bypasses the strict sub-domain isolation blocking our downloads.
-                cookie_str = "; ".join([f"{c.name}={c.value}" for c in client.s.cookies])
+                # Combine our base cookies with the specific chapter's CloudFront keys!
+                cookie_dict = {k: v for k, v in client.s.cookies.items()}
+                if episode_cookies:
+                    cookie_dict.update(episode_cookies)
+                    
+                cookie_str = "; ".join([f"{k}={v}" for k, v in cookie_dict.items()])
                 if cookie_str:
                     headers["Cookie"] = cookie_str
                     
@@ -63,13 +56,8 @@ class EpubBuilder:
                 resp.raise_for_status()
                 return resp.content
                 
-            except requests.exceptions.HTTPError as e:
-                last_error = f"HTTP {e.response.status_code}"
-                if e.response.status_code in (403, 404):
-                    break # CloudFront won't change its mind on retries
-                if attempt < 3: time.sleep(1.0)
-            except requests.exceptions.RequestException as e:
-                last_error = type(e).__name__
+            except Exception as e:
+                last_error = f"HTTP Error or Timeout: {e}"
                 if attempt < 3: time.sleep(1.0)
                 
         print(f"[warn] Image error ({last_error}): {url}")
@@ -128,13 +116,13 @@ class EpubBuilder:
         image_cache: Dict[str, str] = {}
         img_index = 1
 
-        def add_images_and_rewrite(html_str: str, epi_no: str) -> Tuple[str, List[epub.EpubItem]]:
+        def add_images_and_rewrite(html_str: str, epi_no: str, episode_cookies: dict) -> Tuple[str, List[epub.EpubItem]]:
             nonlocal img_index
             soup = BeautifulSoup(html_str, "html.parser")
             added_items: List[epub.EpubItem] =[]
             
-            # Construct the exact URL a real user would be on when reading this chapter
-            viewer_url = f"https://global.novelpia.com/viewer/{novel_id}/{epi_no}" if novel_id else "https://global.novelpia.com/"
+            # Construct the exact URL a real user would be on when reading this chapter (Fixed structure)
+            viewer_url = f"https://global.novelpia.com/viewer/{epi_no}" if epi_no else "https://global.novelpia.com/"
 
             for img in soup.find_all("img"):
                 src = img.get("src")
@@ -150,7 +138,7 @@ class EpubBuilder:
                 if ext not in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
                     ext = ".jpg"
 
-                img_bytes = self._fetch_bytes(client, src, referer_url=viewer_url)
+                img_bytes = self._fetch_bytes(client, src, referer_url=viewer_url, episode_cookies=episode_cookies)
                 if not img_bytes:
                     continue
 
@@ -166,7 +154,7 @@ class EpubBuilder:
             return str(soup), added_items
 
         # --- Cache Filter ---
-        all_results = [None] * len(episodes)
+        all_results =[None] * len(episodes)
         to_fetch = []
         fetch_indices =[]
 
@@ -228,11 +216,12 @@ class EpubBuilder:
 
             html_text = res["html"]
             epi_title = res["epi_title"]
+            signed_key = res.get("signed_key", {}) # ---> NEW: Get keys <---
             
             # Fetch the actual episode number out of the result or fallback gracefully
             current_epi_no = str(res.get("epi_no", episodes[i-1].get("episode_no", str(i))))
             
-            html_text, new_imgs = add_images_and_rewrite(html_text, epi_no=current_epi_no)
+            html_text, new_imgs = add_images_and_rewrite(html_text, epi_no=current_epi_no, episode_cookies=signed_key)
 
             chapter = epub.EpubHtml(
                 title=epi_title,
