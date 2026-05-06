@@ -11,6 +11,7 @@ A fork of [pia-scrap](https://github.com/bayue48/pia-scrap) by bayue48, personal
 - **Smart Updating** — uses a local cache to fetch only new chapters when updating, skipping novels that are already up to date entirely.
 - **Queueing** — supports downloading sequential ranges of novels automatically
 - **Improved threading** - added thread stagger, implemented safe KeyboardInterrupt thread cancellation, reduced aggressive throttle penalty 
+- **Image scraping actually works** - injects neccesary CloudFront keys to download images
 
 ---
 
@@ -19,7 +20,7 @@ A fork of [pia-scrap](https://github.com/bayue48/pia-scrap) by bayue48, personal
 ## Requirements
 
 - Python 3.9+
-- Packages: `requests`, `beautifulsoup4`, `ebooklib`, `tqdm`, `python-dotenv`
+- Packages: `curl_cffi`, `beautifulsoup4`, `ebooklib`, `tqdm`, `python-dotenv`
 
 ```bash
 pip install -r requirements.txt
@@ -89,7 +90,5 @@ output/<title>/.raw_cache/           # if --update is used
 ## Quick Notes
 
 Parallel fetching (multithreading) is pretty much fundementally incompatible with Novelpia's API. It has a low threshold concerning rate limits and requests per second. Even with stagger it will immediately throw out a HTTP 429 (Too Many Requests) error. Parallel downloading only works if the server allows high concurrency. Therefore, 99% of the time, **it's slower than sending requests sequentially**. Don't ask me why it's there.
-
-Image scraping is improved over the original but still can't beat AWS WAF and CloudFront.
 
 Also the max-chapters flag doesn't work.
