@@ -136,6 +136,53 @@ class NovelpiaClient:
         )
         r.raise_for_status()
         return r.json()
+    
+    def my_library(self) -> List[int]:
+        """Fetches the user's bookmarked novels from their library."""
+        url = f"{const.API_BASE}/v1/novel/like/list"
+        novel_ids =[]
+        page = 1
+        
+        while True:
+            params = {
+                "sort": "desc",
+                "sort_col": "lnl.reg_dt",
+                "page": page,
+                "rows": 100,  # Grab 100 at a time to be safe with the server
+                "like_filter": 0
+            }
+            
+            r = request_with_retries(
+                self.s, "GET", url,
+                params=params,
+                headers=merge_login_at({}, self.tokens.login_at),
+                timeout=self.timeout, allow_refresh=True, 
+                refresh_fn=self.refresh, login_fn=self.login,
+                on_rate_limit=self._on_rate_limit
+            )
+            r.raise_for_status()
+            data = r.json()
+            
+            # Extract exactly based on the JSON structure 
+            items = data.get("result", {}).get("list",[])
+            if not items:
+                break
+                
+            for item in items:
+                novel_no = item.get("novel", {}).get("novel_no")
+                if novel_no:
+                    novel_ids.append(int(novel_no))
+                    
+            if len(items) < 100:
+                # we've hit the last page
+                break
+                
+            page += 1
+            time.sleep(0.5) # Gentle delay between page fetches
+            
+        # Deduplicate while preserving order
+        seen = set()
+        return [x for x in novel_ids if not (x in seen or seen.add(x))]
 
     def episode_ticket(self, episode_no: int) -> Dict:
         url = f"{const.API_BASE}/v1/novel/episode"

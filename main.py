@@ -33,9 +33,6 @@ def main():
 
     const.HTTP_LOG = bool(args.debug)
 
-    target_ids = parse_range(args.novel_ids)
-    print(f"[info] Queue size: {len(target_ids)} novels")
-
     cfg = load_config()
     cfg_login_at = (cfg.get("login_at") or "").strip() or None
     cfg_userkey = (cfg.get("userkey") or "").strip() or None
@@ -45,6 +42,7 @@ def main():
     email = args.email or os.getenv("NOVELPIA_EMAIL")
     password = args.password or os.getenv("NOVELPIA_PASSWORD")
 
+    # --- Initialize and authenticate before pulling novel_ids ---
     if email and password:
         client = NovelpiaClient(email=email, password=password, proxy=args.proxy, throttle=args.throttle, userkey=cfg_userkey, tkey=cfg_tkey)
         client.login()
@@ -67,6 +65,22 @@ def main():
     else:
         print("[error] No credentials or stored tokens found. Provide --user and --pass to login once.")
         sys.exit(2)
+
+    # --- Parse ids from library ---
+    if args.novel_ids.lower() in ("mybook", "library"):
+        print("[info] Fetching target novel IDs from your library...")
+        try:
+            target_ids = client.my_library()
+            if not target_ids:
+                print("[warn] Library is empty or failed to parse. Exiting.")
+                sys.exit(0)
+        except Exception as e:
+            print(f"[error] Failed to fetch library: {e}")
+            sys.exit(1)
+    else:
+        target_ids = parse_range(args.novel_ids)
+
+    print(f"[info] Queue size: {len(target_ids)} novels")
 
     # --- Processing Loop ---
     success_count = 0

@@ -8,10 +8,10 @@ A fork of [pia-scrap](https://github.com/bayue48/pia-scrap) by bayue48, personal
 
 ## New Features
 
-- **Smart Updating** — uses a local cache to fetch only new chapters when updating, skipping novels that are already up to date entirely.
-- **Queueing** — supports downloading sequential ranges of novels automatically
+- **Queueing** — supports downloading sequential ranges of novels automatically with better formating
 - **Improved threading** - added thread stagger, implemented safe KeyboardInterrupt thread cancellation, reduced aggressive throttle penalty 
 - **Image scraping actually works** - injects neccesary CloudFront keys to download images
+- **Library access** — special NOVEL_ID argument to download favorited novels
 
 ---
 
@@ -41,7 +41,7 @@ python main.py NOVEL_ID [--user EMAIL] [--pass PASSWORD]
 
 | Argument | Description |
 |---|---|
-| `NOVEL_ID` | Mixed numeric or range `novel_no`, e.g. `49` or `40,47-50` |
+| `NOVEL_ID` | Mixed numeric or range `novel_no`, e.g. `49`, `40,47-50` or `mybook`, `library` to access user favorites |
 | `--user`, `--pass` | Login credentials; tokens saved to `.api.json` for reuse |
 | `--out` | Output directory (default: `output`) |
 | `--max-chapters` | Fetch up to N episodes (`0` or unset = all) |
@@ -73,6 +73,12 @@ python main.py 49
 
 ```bash
 python main.py 95,100-110 --update
+```
+
+**4. Download library** — access user favorites:
+
+```bash
+python main.py library --update
 ```
 
 ---
