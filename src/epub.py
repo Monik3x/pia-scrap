@@ -2,9 +2,10 @@ import html
 import os
 import json
 import time
+import logging
 from curl_cffi import requests
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Callable
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from ebooklib import epub
@@ -12,6 +13,8 @@ from tqdm import tqdm
 from src.api import NovelpiaClient
 from src.const import BASE_URL
 from src.helper import ensure_dir, kebab, media_type_from_ext, normalize_url
+
+logger = logging.getLogger("pia_scrap")
 
 # ----------------------------
 # EPUB Builder
@@ -60,13 +63,14 @@ class EpubBuilder:
                 last_error = f"HTTP Error or Timeout: {e}"
                 if attempt < 3: time.sleep(1.0)
                 
-        print(f"[warn] Image error ({last_error}): {url}")
+        logger.warning(f"[warn] Image error ({last_error}): {url}")
         return None
 
     def build(self, client: NovelpiaClient, novel: Dict, episodes: List[Dict],
               filename_hint: Optional[str] = None, language: str = "en",
               author_fallback: str = "Unknown", css_text: Optional[str] = None,
-              novel_id: Optional[int] = None, update_mode: bool = False, threads: int = 1) -> Tuple[str, str, int]:
+              novel_id: Optional[int] = None, update_mode: bool = False, threads: int = 1,
+              progress_cb: Optional[Callable[[int, int, str], None]] = None) -> Tuple[str, str, int]:
         nv = novel["result"]["novel"]
         title = nv.get("novel_name", f"novel_{nv.get('novel_no','')}")
         writers = novel["result"].get("writer_list") or[]
@@ -172,6 +176,8 @@ class EpubBuilder:
             
             if cached_data:
                 all_results[idx_offset] = cached_data
+                epi_title = ep.get("epi_title") or f"Episode {ep.get('epi_num', idx_offset+1)}"
+                logger.info(f"loaded cached episode {ep.get('epi_num', idx_offset+1)} - {epi_title}")
             else:
                 to_fetch.append(ep)
                 fetch_indices.append(idx_offset)
@@ -179,7 +185,7 @@ class EpubBuilder:
         # Let the user know the cache worked!
         cached_count = len(episodes) - len(to_fetch)
         if cached_count > 0:
-            print(f"[info] Successfully loaded {cached_count} chapters instantly from local cache.")
+            logger.info(f"Successfully loaded {cached_count} chapters instantly from local cache.")
 
         # Callback to write cache instantly when a thread returns
         def cache_result(res):
@@ -195,23 +201,43 @@ class EpubBuilder:
 
         # --- Parallel Fetching ---
         if to_fetch:
-            pbar = tqdm(total=len(to_fetch), desc="Fetching chapters", unit="chap")
-            def update_pbar():
-                pbar.update(1)
+            pbar = None
+            if not progress_cb:
+                # Setup a default CLI tqdm progress bar if no GUI callback is registered
+                pbar = tqdm(total=len(to_fetch), desc="Fetching chapters", unit="chap")
 
-            # Max workers clamped to 2 to respect Novelpia's strict rate limits
-            fetched = client.fetch_episodes_parallel(to_fetch, max_workers=threads, progress_cb=update_pbar, on_complete_cb=cache_result)
-            pbar.close()
+            completed_count = 0
+            total_count = len(to_fetch)
+
+            def internal_progress_cb(curr, tot, label):
+                nonlocal completed_count
+                completed_count += 1
+                if pbar:
+                    pbar.update(1)
+                if progress_cb:
+                    progress_cb(completed_count, total_count, label)
+
+            fetched = client.fetch_episodes_parallel(
+                to_fetch, max_workers=threads,
+                progress_cb=internal_progress_cb,
+                on_complete_cb=cache_result
+            )
+            
+            if pbar:
+                pbar.close()
 
             for i, res in enumerate(fetched):
                 orig_idx = fetch_indices[i]
                 all_results[orig_idx] = res
+        elif progress_cb:
+            # If everything was cached, let's trigger one finish update
+            progress_cb(len(episodes), len(episodes), "Completed (cached)")
 
         # --- Processing Results ---
         for i, res in enumerate(all_results, 1):
             if not res or "error" in res:
                 err = res.get("error") if res else "Unknown error"
-                print(f"[warn] Failed to fetch chapter {i}: {err}")
+                logger.warning(f"[warn] Failed to fetch chapter {i}: {err}")
                 continue
 
             html_text = res["html"]
@@ -223,16 +249,22 @@ class EpubBuilder:
             
             html_text, new_imgs = add_images_and_rewrite(html_text, epi_no=current_epi_no, episode_cookies=signed_key)
 
+            html_content = f'''<html xmlns="http://www.w3.org/1999/xhtml">
+            <head>
+                <title>{html.escape(epi_title)}</title>
+                <link rel="stylesheet" href="style/main.css"/>
+            </head>
+            <body>
+                <h2 class="epi-title">{html.escape(epi_title)}</h2>
+                {html_text}
+            </body>
+            </html>'''
+
             chapter = epub.EpubHtml(
                 title=epi_title,
                 file_name=f"chap_{i:04d}.xhtml",
                 lang=language,
-                content=(
-                    f"<html xmlns=\"http://www.w3.org/1999/xhtml\">"
-                    f"<head><title>{html.escape(epi_title)}</title>"
-                    f"<link rel=\"stylesheet\" href=\"style/main.css\"/></head>"
-                    f"<body><h2 class=\"epi-title\">{html.escape(epi_title)}</h2>{html_text}</body></html>"
-                ),
+                content=html_content,
             )
 
             book.add_item(chapter)

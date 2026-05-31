@@ -1,13 +1,9 @@
 import argparse
 import sys
 import os
-import time
-from curl_cffi import requests
-
+import logging
 from dotenv import load_dotenv
-from src.api import NovelpiaClient
-from src.builder import build_epub, build_txt
-from src.helper import load_config, save_config, parse_range
+from src.engine import ScraperEngine
 from src import const
 
 # ----------------------------
@@ -31,102 +27,59 @@ def main():
     ap.add_argument("--threads", type=int, default=1, help="Number of workers sending requests (default: 1), recommended to leave as is")
     args = ap.parse_args()
 
+    # Configure Logging based on debug mode
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stdout)]
+    )
+    
     const.HTTP_LOG = bool(args.debug)
 
-    cfg = load_config()
-    cfg_login_at = (cfg.get("login_at") or "").strip() or None
-    cfg_userkey = (cfg.get("userkey") or "").strip() or None
-    cfg_tkey = (cfg.get("tkey") or "").strip() or None
+    engine = ScraperEngine(
+        email=args.email,
+        password=args.password,
+        proxy=args.proxy,
+        throttle=args.throttle,
+        out_dir=args.out,
+        language=args.lang,
+        max_chapters=args.max_chapters,
+        threads=args.threads,
+        txt_mode=args.txt,
+        update_mode=args.update,
+        debug_mode=args.debug
+    )
 
-    # Priority: CLI > .env > config tokens > error
-    email = args.email or os.getenv("NOVELPIA_EMAIL")
-    password = args.password or os.getenv("NOVELPIA_PASSWORD")
-
-    # --- Initialize and authenticate before pulling novel_ids ---
-    if email and password:
-        client = NovelpiaClient(email=email, password=password, proxy=args.proxy, throttle=args.throttle, userkey=cfg_userkey, tkey=cfg_tkey)
-        client.login()
-        userkey_val = None
-        tkey_val = None
-        try:
-            userkey_val = client.s.cookies.get("USERKEY")
-            tkey_val = client.s.cookies.get("TKEY")
-        except Exception as e:
-            print(f"Error occurred while fetching cookies: {e}")
-            pass
-        save_config({
-            "login_at": client.tokens.login_at,
-            "userkey": userkey_val or cfg_userkey or "",
-            "tkey": tkey_val or client.tokens.tkey or cfg_tkey or "",
-        })
-    elif cfg_login_at and cfg_userkey:
-        client = NovelpiaClient(email=None, password=None, proxy=args.proxy, throttle=args.throttle, userkey=cfg_userkey, tkey=cfg_tkey)
-        client.tokens.login_at = cfg_login_at
-    else:
-        print("[error] No credentials or stored tokens found. Provide --user and --pass to login once.")
+    # Initialize client (reusing or saving tokens)
+    try:
+        if not engine.initialize_client():
+            print("[error] No credentials or stored tokens found. Provide --user and --pass to login once.")
+            sys.exit(2)
+    except Exception as e:
+        print(f"[error] Failed client initialization: {e}")
         sys.exit(2)
 
-    # --- Parse ids from library ---
-    if args.novel_ids.lower() in ("mybook", "library"):
-        print("[info] Fetching target novel IDs from your library...")
-        try:
-            target_ids = client.my_library()
-            if not target_ids:
-                print("[warn] Library is empty or failed to parse. Exiting.")
-                sys.exit(0)
-        except Exception as e:
-            print(f"[error] Failed to fetch library: {e}")
-            sys.exit(1)
-    else:
-        target_ids = parse_range(args.novel_ids)
+    # Resolve IDs from input queue or library
+    try:
+        target_ids = engine.resolve_novel_ids(args.novel_ids)
+        if not target_ids:
+            print("[warn] Queue is empty or failed to parse. Exiting.")
+            sys.exit(0)
+    except Exception as e:
+        print(f"[error] Failed to parse range or retrieve library list: {e}")
+        sys.exit(1)
 
     print(f"[info] Queue size: {len(target_ids)} novels")
 
-    # --- Processing Loop ---
-    success_count = 0
-    fail_count = 0
-    skipped_count = 0
-
-    for idx, novel_id in enumerate(target_ids):
-        print(f"\n--- Processing ID {novel_id} ({idx+1}/{len(target_ids)}) ---")
-        try:
-            if args.txt:
-                out_dir_final, title, count = build_txt(
-                    client, novel_id, args.out,
-                    max_chapters=(args.max_chapters if args.max_chapters and args.max_chapters > 0 else None),
-                    language=args.lang, debug_dump=args.debug,
-                    threads=args.threads
-                )
-                print(f"[success] Wrote TXT files under: {out_dir_final}  |  Title: {title}  |  Chapters: {count}")
-                success_count += 1
-            else:
-                out_file, title, count = build_epub(
-                    client, novel_id, args.out,
-                    max_chapters=(args.max_chapters if args.max_chapters and args.max_chapters > 0 else None),
-                    language=args.lang, debug_dump=args.debug,
-                    update_mode=args.update,
-                    threads=args.threads
-                )
-                
-                if out_file is None:
-                    skipped_count += 1
-                else:
-                    print(f"[success] Wrote EPUB: {out_file}  |  Title: {title}  |  Chapters: {count}")
-                    success_count += 1
-
-        except Exception as e:
-            err_str = str(e)
-            if "NoneType" in err_str or "KeyError" in err_str:
-                print(f"[-] Novel {novel_id} likely does not exist or has no data. Skipping.")
-            elif hasattr(e, "response") and e.response and e.response.status_code == 404:
-                print(f"[-] Novel {novel_id} returned 404. Skipping.")
-            else:
-                print(f"[error] Failed processing {novel_id}: {e}")
-            
-            fail_count += 1
-            time.sleep(1.0)
-
-    print(f"\n[done] Finished range. Success: {success_count}, Skipped (Up to date): {skipped_count}, Failed/No Data: {fail_count}")
+    # Run the scraper loop
+    try:
+        results = engine.run_download_queue(target_ids)
+        sys.exit(0 if results["failed"] == 0 else 1)
+    except KeyboardInterrupt:
+        print("\n[warn] aborted by user")
+        sys.exit(130)
 
 if __name__ == "__main__":
     try:

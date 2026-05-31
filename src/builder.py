@@ -1,6 +1,7 @@
 import json
 import os
-from typing import List
+import logging
+from typing import List, Optional, Callable
 
 from bs4 import BeautifulSoup
 from tqdm import tqdm
@@ -8,12 +9,18 @@ from src.epub import EpubBuilder
 from src.helper import ensure_dir, kebab, sanitize_filename
 from src.novel import fetch_novel_and_episodes
 
+logger = logging.getLogger("pia_scrap")
+
 # ----------------------------
 # Main Build Function
 # ----------------------------
 
-def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", debug_dump=False, update_mode=False, threads=1):
-    data_novel, ep_list, title = fetch_novel_and_episodes(client, novel_id, max_chapters)
+def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", debug_dump=False, update_mode=False, threads=1,
+               progress_cb: Optional[Callable[[int, int, str], None]] = None,
+               status_cb: Optional[Callable[[str], None]] = None):
+    if status_cb:
+        status_cb("Fetching novel metadata and episode list...")
+    data_novel, ep_list, title = fetch_novel_and_episodes(client, novel_id, max_chapters=max_chapters)
 
     if update_mode:
         base = kebab(title)
@@ -28,11 +35,16 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", debu
                     target_chapters = len(ep_list)
                         
                     if existing_chapters >= target_chapters and target_chapters > 0:
-                        print(f"[info] '{title}' is already up to date ({existing_chapters} chapters). Skipping API fetch.")
+                        msg = f"'{title}' is already up to date ({existing_chapters} chapters). Skipping API fetch."
+                        logger.info(f"{msg}")
+                        if status_cb:
+                            status_cb(msg)
                         return None, title, existing_chapters
             except Exception:
                 pass
 
+    if status_cb:
+        status_cb("Downloading chapters and building EPUB...")
     builder = EpubBuilder(out_dir, debug_dump=debug_dump)
     out_file, title, count = builder.build(
         client=client,
@@ -42,10 +54,12 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", debu
         filename_hint=title,
         language=language,
         novel_id=novel_id,
-        update_mode=update_mode
+        update_mode=update_mode,
+        progress_cb=progress_cb
     )
 
-    # Move this specifically here so it doesn't write if build fails
+    if status_cb:
+        status_cb("Finalizing metadata...")
     base = kebab(title)
     book_dir = os.path.join(out_dir, base)
     ensure_dir(book_dir)
@@ -53,26 +67,46 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", debu
 
     return out_file, title, count
 
-def build_txt(client, novel_id, out_dir, max_chapters=None, language="en", debug_dump=False, threads=1):
+def build_txt(client, novel_id, out_dir, max_chapters=None, language="en", debug_dump=False, threads=1,
+              progress_cb: Optional[Callable[[int, int, str], None]] = None,
+              status_cb: Optional[Callable[[str], None]] = None):
+    if status_cb:
+        status_cb("Fetching novel metadata and episode list...")
     data_novel, ep_list, title = fetch_novel_and_episodes(client, novel_id, max_chapters)
 
     base = kebab(title)
     book_dir = os.path.join(out_dir, base)
     ensure_dir(book_dir)
 
-    total = 0
-    pbar = tqdm(total=len(ep_list), desc="Exporting TXT", unit="chap")
+    total = len(ep_list)
+    pbar = None
+    if not progress_cb:
+        pbar = tqdm(total=total, desc="Exporting TXT", unit="chap")
 
-    def update_pbar():
-        pbar.update(1)
+    completed = 0
+    def internal_progress_cb(curr, tot, label):
+        nonlocal completed
+        completed += 1
+        if pbar:
+            pbar.update(1)
+        if progress_cb:
+            progress_cb(completed, total, label)
 
-    fetched_results = client.fetch_episodes_parallel(ep_list, max_workers=threads, progress_cb=update_pbar)
-    pbar.close()
+    if status_cb:
+        status_cb("Downloading chapters in parallel...")
+    fetched_results = client.fetch_episodes_parallel(
+        ep_list, max_workers=threads, progress_cb=internal_progress_cb
+    )
+    if pbar:
+        pbar.close()
 
+    if status_cb:
+        status_cb("Saving TXT files to disk...")
+    success_count = 0
     for i, res in enumerate(fetched_results, 1):
         if not res or "error" in res:
             err = res.get("error") if res else "Unknown error"
-            print(f"[warn] Failed to fetch chapter {i}: {err}")
+            logger.warning(f"[warn] Failed to fetch chapter {i}: {err}")
             continue
 
         html_text = res["html"]
@@ -85,23 +119,28 @@ def build_txt(client, novel_id, out_dir, max_chapters=None, language="en", debug
         with open(os.path.join(book_dir, fname), "w", encoding="utf-8") as f:
             f.write(text)
 
-        total += 1
+        success_count += 1
     
-    # Run only at the end
+    if status_cb:
+        status_cb("Writing metadata files...")
     build_metadata(book_dir, data_novel, novel_id, ep_list, max_chapters)
 
-    return book_dir, title, total
+    return book_dir, title, success_count
 
 def build_metadata(book_dir, data_novel, novel_id, ep_list, max_chapters=None):
     nv = data_novel["result"]["novel"]
     title = nv.get("novel_name", f"novel_{nv.get('novel_no','')}")
-    epi_cnt = data_novel["result"].get("info", {}).get("epi_cnt") or nv.get("count_epi") or 0
+
+    result = data_novel.get("result") or {}
+    info = result.get("info") if isinstance(result, dict) else {}
+    epi_cnt = info.get("epi_cnt") or nv.get("count_epi") or 0
+
     writers = data_novel["result"].get("writer_list") or []
     author = (writers[0].get("writer_name") if writers and writers[0].get("writer_name") else "Unknown Author")
     status = "Completed" if str(nv.get("flag_complete", 0)) == "1" else "Ongoing"
     description = (nv.get("novel_story") or "").strip()
     
-    # tags can be in result.tag_list or novel.tag_list, accept str or dict with name fields
+    # Tags can be in result.tag_list or novel.tag_list, accept str or dict with name fields
     tag_items = (data_novel.get("result", {}).get("tag_list")
                  or nv.get("tag_list")
                  or [])
@@ -114,7 +153,6 @@ def build_metadata(book_dir, data_novel, novel_id, ep_list, max_chapters=None):
             if isinstance(val, str):
                 tags.append(val)
 
-    # unique while preserving order
     seen = set()
     uniq_tags = []
     for t in tags:

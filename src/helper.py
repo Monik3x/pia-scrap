@@ -2,11 +2,12 @@ import base64
 import json
 import os
 import re
-import sys
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urljoin, urlparse
-import requests
 from src.const import BASE_URL, CONFIG_PATH, IMG_BASE_HTTPS
+
+logger = logging.getLogger("pia_scrap")
 
 # ----------------------------
 # Helpers
@@ -67,7 +68,7 @@ def load_config() -> Dict[str, Any]:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 return json.load(f) or {}
     except Exception as e:
-        print(f"Error occurred while loading config: {e}")
+        logger.error(f"Error occurred while loading config: {e}")
         return {}
     return {}
 
@@ -76,7 +77,7 @@ def save_config(cfg: Dict[str, Any]) -> None:
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"Error occurred while saving config: {e}")
+        logger.error(f"Error occurred while saving config: {e}")
         pass
 
 # ----------------------------
@@ -129,32 +130,32 @@ def _j(x: Any) -> str:
         return str(x)
     
 def attach_auth_cookies(session, headers=None):
-        ck = getattr(session, "cookies", None)
-        if ck is None:
-            return headers
-
-        uval = None
-        tval = None
-
-        try:
-            uval = ck.get("USERKEY")
-            tval = ck.get("TKEY")
-        except Exception as e:
-            print(f"Error occurred while fetching cookies: {e}")
-
-        cookie_parts = []
-        if uval:
-            cookie_parts.append(f"USERKEY={uval}")
-        if tval:
-            cookie_parts.append(f"TKEY={tval}")
-
-        cookie_parts.append("last_login=basic")
-
-        if cookie_parts:
-            headers = dict(headers or {})
-            headers.setdefault("Cookie", "; ".join(cookie_parts))
-
+    ck = getattr(session, "cookies", None)
+    if ck is None:
         return headers
+
+    uval = None
+    tval = None
+
+    try:
+        uval = ck.get("USERKEY")
+        tval = ck.get("TKEY")
+    except Exception as e:
+        logger.error(f"Error occurred while fetching cookies: {e}")
+
+    cookie_parts = []
+    if uval:
+        cookie_parts.append(f"USERKEY={uval}")
+    if tval:
+        cookie_parts.append(f"TKEY={tval}")
+
+    cookie_parts.append("last_login=basic")
+
+    if cookie_parts:
+        headers = dict(headers or {})
+        headers.setdefault("Cookie", "; ".join(cookie_parts))
+
+    return headers
 
 # ----------------------------
 # Token extraction (STRICT)
@@ -175,7 +176,9 @@ def extract_t_token(tdata: dict) -> Tuple[Optional[str], Optional[str]]:
     Prefer JWT-like tokens, but accept any non-empty string if present.
     If using URL, accept any _t value on the official content endpoint.
     """
-    res = tdata.get("result", {}) if isinstance(tdata, dict) else {}
+    res = tdata.get("result") or {}
+    if not isinstance(res, dict):
+        res = {}
     fallback_token: Optional[str] = None
 
     # 1) common keys at result
@@ -211,7 +214,7 @@ def extract_t_token(tdata: dict) -> Tuple[Optional[str], Optional[str]]:
                         # fallback
                         fallback_token = fallback_token or cand
             except Exception as e:
-                print(f"Error occurred while parsing URL: {e}")
+                logger.error(f"Error occurred while parsing URL: {e}")
                 pass
     if fallback_token:
         return fallback_token, None
@@ -241,14 +244,12 @@ def parse_range(range_str: str) -> List[int]:
                 # Add all numbers in the range (inclusive)
                 result.extend(range(start, end + 1))
             except ValueError:
-                print(f"[error] Invalid range format: {part}. Use 'start-end' (e.g., 100-105).")
-                sys.exit(1)
+                raise ValueError(f"Invalid range format: {part}. Use 'start-end' (e.g., 100-105).")
         else:
             try:
                 result.append(int(part))
             except ValueError:
-                print(f"[error] Invalid ID: {part}")
-                sys.exit(1)
+                raise ValueError(f"Invalid ID: {part}")
                 
     # Remove duplicates while preserving the order they were entered
     seen = set()

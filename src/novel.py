@@ -1,5 +1,8 @@
+import logging
 from bs4 import BeautifulSoup
 from src.helper import normalize_url
+
+logger = logging.getLogger("pia_scrap")
 
 # ----------------------------
 # Novelpia Novel & Episodes Fetcher
@@ -25,11 +28,13 @@ def fetch_novel_and_episodes(client, novel_id, start_chapter=None, end_chapter=N
         res = client.me()
         if str(res.get("statusCode")) == "200":
             mem = (((res.get("result") or {}).get("login") or {}).get("mem_nick")) or "Unknown"
-            print(f"[auth] Logged in as: {mem}")
-    except Exception:
-        pass
+            logger.info(f"[auth] Logged in as: {mem}")
+        else:
+            logger.warning(f"[auth] Authentication validation returned code {res.get('statusCode')}: {res.get('errmsg')}")
+    except Exception as e:
+        logger.warning(f"[auth] Stored credentials could not be verified: {e}. If your session has expired, try logging in again using your email and password.")
 
-    print("[info] extracting metadata…")
+    logger.info("extracting metadata…")
     data_novel = client.novel(novel_id)
 
     nv = data_novel["result"]["novel"]
@@ -39,7 +44,7 @@ def fetch_novel_and_episodes(client, novel_id, start_chapter=None, end_chapter=N
     author = (writers[0].get("writer_name") if writers and writers[0].get("writer_name") else "Unknown Author")
     status = "Completed" if str(nv.get("flag_complete", 0)) == "1" else "Ongoing"
     
-    print(f"[info] title='{title}' author='{author}' chapter={epi_cnt} status={status}")
+    logger.info(f"title='{title}' author='{author}' chapter={epi_cnt} status={status}")
 
     rows = int(epi_cnt) if epi_cnt else 1000
     data_list = client.episode_list(novel_id, rows=rows)

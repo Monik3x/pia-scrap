@@ -8,19 +8,18 @@ A fork of [pia-scrap](https://github.com/bayue48/pia-scrap) by bayue48, personal
 
 ## New Features
 
-- **Queueing** — supports downloading sequential ranges of novels automatically with better formating
-- **Improved threading** - added thread stagger, implemented safe KeyboardInterrupt thread cancellation, reduced aggressive throttle penalty 
-- **Image scraping actually works** - injects neccesary CloudFront keys to download images
+- **Queueing** — supports downloading sequential ranges of novels automatically with better formatting
+- **Improved threading** - added thread stagger, implemented safe KeyboardInterrupt and GUI thread cancellation, reduced aggressive throttle penalty
+- **Image scraping actually works** - injects necessary CloudFront keys to download images
 - **Library access** — special NOVEL_ID argument to download favorited novels
+- **Graphical User Interface** — an easier to use UI with a built-in local library manager
 
 ---
-
-
 
 ## Requirements
 
 - Python 3.9+
-- Packages: `curl_cffi`, `beautifulsoup4`, `ebooklib`, `tqdm`, `python-dotenv`
+- Packages: `curl_cffi`, `beautifulsoup4`, `ebooklib`, `tqdm`, `python-dotenv`, `customtkinter`
 
 ```bash
 pip install -r requirements.txt
@@ -28,7 +27,15 @@ pip install -r requirements.txt
 
 ---
 
-## CLI
+## Usage
+
+### Graphical Interface
+
+```bash
+python gui.py
+```
+
+### Command Line Interface
 
 ```bash
 python main.py NOVEL_ID [--user EMAIL] [--pass PASSWORD]
@@ -37,7 +44,7 @@ python main.py NOVEL_ID [--user EMAIL] [--pass PASSWORD]
                [--debug] [--txt] [--update] [--threads]
 ```
 
-### Arguments
+### CLI Arguments
 
 | Argument | Description |
 |---|---|
@@ -55,7 +62,7 @@ python main.py NOVEL_ID [--user EMAIL] [--pass PASSWORD]
 
 ---
 
-## Quick Start
+## CLI Quick Start
 
 **1. First run** — provide your Novelpia credentials (tokens are persisted to `.api.json`):
 
@@ -87,7 +94,7 @@ python main.py library --update
 
 Files are written to `output/<title>/`:
 
-```
+```text
 output/<title>/<title>.epub
 output/<title>/<episode-title>.txt   # if --txt is used
 output/<title>/.raw_cache/           # if --update is used
@@ -96,6 +103,4 @@ output/<title>/.raw_cache/           # if --update is used
 
 ## Quick Notes
 
-Parallel fetching (multithreading) is pretty much fundementally incompatible with Novelpia's API. It has a low threshold concerning rate limits and requests per second. Even with stagger it will immediately throw out a HTTP 429 (Too Many Requests) error. Parallel downloading only works if the server allows high concurrency. Therefore, 99% of the time, **it's slower than sending requests sequentially**. Don't ask me why it's there.
-
-Also the max-chapters flag doesn't work.
+Parallel fetching (multithreading) is pretty much fundamentally incompatible with Novelpia's API. It has a low threshold concerning rate limits and requests per second. Even with stagger it will immediately throw out a HTTP 429 (Too Many Requests) error. Parallel downloading only works if the server allows high concurrency. Therefore, 99% of the time, **it's slower than sending requests sequentially**. Don't ask me why it's there.

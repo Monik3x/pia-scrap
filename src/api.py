@@ -3,16 +3,20 @@ import os
 import random
 import time
 import uuid
+import logging
+import threading
 from curl_cffi import requests
 import concurrent.futures
 import re as _re
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Callable
 from src import const
-from src.helper import _j, _mask_kv, attach_auth_cookies, merge_login_at
+from src.helper import attach_auth_cookies, merge_login_at
 from src.helper import extract_t_token
 from src.novel import html_from_episode_text
+
+logger = logging.getLogger("pia_scrap")
 
 # ----------------------------
 # API Client
@@ -27,7 +31,8 @@ class Tokens:
 class NovelpiaClient:
     def __init__(self, email: Optional[str] = None, password: Optional[str] = None,
                  proxy: Optional[str] = None, timeout: int = 30, throttle: float = 1.5,
-                 userkey: Optional[str] = None, tkey: Optional[str] = None):
+                 userkey: Optional[str] = None, tkey: Optional[str] = None,
+                 cancel_event: Optional[threading.Event] = None):
         self.s = requests.Session(impersonate="chrome110")
         self.s.headers.update(const.SESSION_HEADERS.copy())
         if proxy:
@@ -36,7 +41,9 @@ class NovelpiaClient:
         self.tokens = Tokens()
         self.email = email
         self.password = password
-        # delay seconds between episode-related API calls to reduce 429/500 rate limits
+        self.cancel_event = cancel_event
+        # To avoid duplicate refreshes later on possible expiration mid process
+        self._auth_lock = threading.RLock() 
         self.throttle = max(0.0, float(throttle or 1.5))
         try:
             if not userkey:
@@ -47,14 +54,30 @@ class NovelpiaClient:
                 self.s.cookies.set("TKEY", tkey, domain=".novelpia.com", path="/")
                 self.tokens.tkey = tkey
         except Exception as e:
-            print(f"Error setting cookies: {e}")
+            logger.error(f"Error setting cookies: {e}")
+
+    def sleep_cooperative(self, seconds: float):
+        """Sleeps in small intervals to keep the client responsive to cancellation events."""
+        if not seconds:
+            return
+        steps = int(seconds / 0.1)
+        for _ in range(steps):
+            if self.cancel_event and self.cancel_event.is_set():
+                break
+            time.sleep(0.1)
+        rem = seconds % 0.1
+        if rem > 0 and not (self.cancel_event and self.cancel_event.is_set()):
+            time.sleep(rem)
 
     def login(self):
+        with self._auth_lock:
+            url = f"{const.API_BASE}/v1/member/login"
         url = f"{const.API_BASE}/v1/member/login"
         r = request_with_retries(
             self.s, "POST", url,
             json={"email": self.email, "passwd": self.password},
             timeout=self.timeout, max_retries=2,
+            cancel_event=self.cancel_event
         )
         r.raise_for_status()
         data = r.json()
@@ -67,11 +90,14 @@ class NovelpiaClient:
             pass
 
     def refresh(self) -> Optional[str]:
+        with self._auth_lock:
+            url = f"{const.API_BASE}/v1/login/refresh"
         url = f"{const.API_BASE}/v1/login/refresh"
         r = request_with_retries(
             self.s, "GET", url,
             headers=merge_login_at({}, self.tokens.login_at),
             timeout=self.timeout, max_retries=2,
+            cancel_event=self.cancel_event
         )
         r.raise_for_status()
         self.tokens.login_at = r.json()["result"]["LOGINAT"]
@@ -83,13 +109,13 @@ class NovelpiaClient:
                     with open(const.CONFIG_PATH, "r", encoding="utf-8") as f:
                         cfg = json.load(f) or {}
                 except Exception as e:
-                    print(f"Error loading config: {e}")
+                    logger.error(f"Error loading config: {e}")
                     cfg = {}
             cfg["login_at"] = self.tokens.login_at
             with open(const.CONFIG_PATH, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            print(f"Error saving config: {e}")
+            logger.error(f"Error saving config: {e}")
             pass
         return self.tokens.login_at
 
@@ -97,7 +123,7 @@ class NovelpiaClient:
         old = self.throttle
         self.throttle = min(5.0, self.throttle + 0.5) # Reduced harsh penalty
         if const.HTTP_LOG:
-            print(f"[api] Increased throttle from {old}s to {self.throttle}s due to rate limit.")
+            logger.warning(f"[api] Increased throttle from {old}s to {self.throttle}s due to rate limit.")
 
     def me(self) -> Dict:
         url = f"{const.API_BASE}/v1/login/me"
@@ -106,7 +132,8 @@ class NovelpiaClient:
             headers=merge_login_at({}, self.tokens.login_at),
             timeout=self.timeout, allow_refresh=True, 
             refresh_fn=self.refresh, login_fn=self.login,
-            on_rate_limit=self._on_rate_limit
+            on_rate_limit=self._on_rate_limit,
+            cancel_event=self.cancel_event
         )
         r.raise_for_status()
         return r.json()
@@ -119,7 +146,9 @@ class NovelpiaClient:
             params={"novel_no": novel_id},
             timeout=self.timeout, allow_refresh=True, 
             refresh_fn=self.refresh, login_fn=self.login,
-            on_rate_limit=self._on_rate_limit
+            on_rate_limit=self._on_rate_limit,
+            max_retries=1,  # Most likely error here is 500 from accessing an empty/invalid novel_id, limit time lost backing off
+            cancel_event=self.cancel_event
         )
         r.raise_for_status()
         return r.json()
@@ -132,7 +161,9 @@ class NovelpiaClient:
             params={"novel_no": novel_id, "rows": rows, "sort": "ASC"},
             timeout=self.timeout, allow_refresh=True, 
             refresh_fn=self.refresh, login_fn=self.login,
-            on_rate_limit=self._on_rate_limit
+            on_rate_limit=self._on_rate_limit,
+            max_retries=1,
+            cancel_event=self.cancel_event
         )
         r.raise_for_status()
         return r.json()
@@ -140,15 +171,19 @@ class NovelpiaClient:
     def my_library(self) -> List[int]:
         """Fetches the user's bookmarked novels from their library."""
         url = f"{const.API_BASE}/v1/novel/like/list"
-        novel_ids =[]
+        novel_ids = []
         page = 1
         
         while True:
+            if self.cancel_event and self.cancel_event.is_set():
+                logger.info("Library fetch interrupted by user cancel command.")
+                break
+
             params = {
                 "sort": "desc",
                 "sort_col": "lnl.reg_dt",
                 "page": page,
-                "rows": 100,  # Grab 100 at a time to be safe with the server
+                "rows": 100,
                 "like_filter": 0
             }
             
@@ -158,13 +193,14 @@ class NovelpiaClient:
                 headers=merge_login_at({}, self.tokens.login_at),
                 timeout=self.timeout, allow_refresh=True, 
                 refresh_fn=self.refresh, login_fn=self.login,
-                on_rate_limit=self._on_rate_limit
+                on_rate_limit=self._on_rate_limit,
+                cancel_event=self.cancel_event
             )
             r.raise_for_status()
             data = r.json()
             
-            # Extract exactly based on the JSON structure 
-            items = data.get("result", {}).get("list",[])
+            res_block = data.get("result") or {}
+            items = res_block.get("list", []) if isinstance(res_block, dict) else []
             if not items:
                 break
                 
@@ -178,7 +214,7 @@ class NovelpiaClient:
                 break
                 
             page += 1
-            time.sleep(0.5) # Gentle delay between page fetches
+            self.sleep_cooperative(0.5)
             
         # Deduplicate while preserving order
         seen = set()
@@ -189,13 +225,18 @@ class NovelpiaClient:
         headers = merge_login_at({}, self.tokens.login_at)
         params = {"episode_no": episode_no}
         if self.throttle:
-            time.sleep(random.uniform(self.throttle * 0.5, self.throttle))
+            self.sleep_cooperative(random.uniform(self.throttle * 0.5, self.throttle))
+        
+        if self.cancel_event and self.cancel_event.is_set():
+            raise RuntimeError("Request cancelled by user request.")
+
         r = request_with_retries(
             self.s, "GET", url,
             headers=headers, params=params,
             timeout=self.timeout, allow_refresh=True, 
             refresh_fn=self.refresh, login_fn=self.login,
             on_rate_limit=self._on_rate_limit, max_retries=4,
+            cancel_event=self.cancel_event
         )
         r.raise_for_status()
         return r.json()
@@ -203,20 +244,27 @@ class NovelpiaClient:
     def episode_content(self, token_t: str) -> Dict:
         url = f"{const.API_BASE}/v1/novel/episode/content"
         if self.throttle:
-            time.sleep(random.uniform(self.throttle * 0.5, self.throttle))
+            self.sleep_cooperative(random.uniform(self.throttle * 0.5, self.throttle))
+            
+        if self.cancel_event and self.cancel_event.is_set():
+            raise RuntimeError("Request cancelled by user request.")
+
         r = request_with_retries(
             self.s, "GET", url,
             params={"_t": token_t},
             timeout=self.timeout, max_retries=3,
             allow_refresh=True, refresh_fn=self.refresh, login_fn=self.login,
-            on_rate_limit=self._on_rate_limit
+            on_rate_limit=self._on_rate_limit,
+            cancel_event=self.cancel_event
         )
         r.raise_for_status()
         return r.json()
 
     def fetch_episode(self, ep: Dict, idx: int = 0) -> Dict:
-        # Micro-staggering to prevent Thundering Herd on thread launch
-        time.sleep(random.uniform(0.1, 0.6))
+        if self.cancel_event and self.cancel_event.is_set():
+            return {"error": "Cancelled by user", "epi_no": None, "epi_title": ep.get("epi_title") or f"Episode {ep.get('epi_num')}", "idx": idx}
+
+        self.sleep_cooperative(random.uniform(0.1, 0.6))
         
         episode_no = ep.get("episode_no")
         if episode_no is None:
@@ -229,19 +277,25 @@ class NovelpiaClient:
         epi_no = int(episode_no)
         epi_title = ep.get("epi_title") or f"Episode {ep.get('epi_num')}"
         
+        if self.cancel_event and self.cancel_event.is_set():
+            return {"error": "Cancelled by user", "epi_no": epi_no, "epi_title": epi_title, "idx": idx}
+
         # 1) Ticket
+        logger.info(f"ticket for episode {ep.get('epi_num', idx)} - {epi_title}")
         try:
             tdata = self.episode_ticket(epi_no)
         except Exception as e:
             return {"error": str(e), "epi_no": epi_no, "epi_title": epi_title, "idx": idx}
 
         token_t, direct_url = extract_t_token(tdata)
-
-        # ---> NEW: Grab the CloudFront cookies from the JSON <---
-        signed_key = tdata.get("result", {}).get("signed_key", {})
+        res_block = tdata.get("result") or {}
+        signed_key = res_block.get("signed_key", {}) if isinstance(res_block, dict) else {}
 
         if not token_t and not direct_url:
             return {"error": "no token found", "epi_no": epi_no, "epi_title": epi_title, "idx": idx}
+
+        if self.cancel_event and self.cancel_event.is_set():
+            return {"error": "Cancelled by user", "epi_no": epi_no, "epi_title": epi_title, "idx": idx}
 
         # 2) Content
         try:
@@ -286,11 +340,16 @@ class NovelpiaClient:
             "epi_title": epi_title,
             "epi_no": epi_no,
             "idx": idx,
-            "signed_key": signed_key, # ---> NEW: Return the keys <---
+            "signed_key": signed_key,
         }
 
-    def fetch_episodes_parallel(self, ep_list: List[Dict[str, Any]], max_workers: int = 2, progress_cb=None, on_complete_cb=None) -> List[Dict[str, Any]]:
+    def fetch_episodes_parallel(self, ep_list: List[Dict[str, Any]], max_workers: int = 2,
+                                progress_cb: Optional[Callable[[int, int, str], None]] = None,
+                                on_complete_cb=None) -> List[Dict[str, Any]]:
         results: List[Dict[str, Any]] = [{} for _ in range(len(ep_list))]
+        completed = 0
+        total = len(ep_list)
+        
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_idx = {
                 executor.submit(self.fetch_episode, ep, i+1): i 
@@ -298,6 +357,12 @@ class NovelpiaClient:
             }
             try:
                 for future in concurrent.futures.as_completed(future_to_idx):
+                    if self.cancel_event and self.cancel_event.is_set():
+                        for fut in future_to_idx:
+                            fut.cancel()
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        raise RuntimeError("Download pool stopped by cancellation request.")
+
                     idx = future_to_idx[future]
                     try:
                         res = future.result()
@@ -305,13 +370,17 @@ class NovelpiaClient:
                     except Exception as e:
                         results[idx] = {"error": str(e), "idx": idx+1}
                     
+                    completed += 1
+                    epi_title = results[idx].get("epi_title") or ep_list[idx].get("epi_title") or f"Episode {idx+1}"
+                    
                     if on_complete_cb:
                         on_complete_cb(results[idx])
                     if progress_cb:
-                        progress_cb()
-            except KeyboardInterrupt:
-                print("\n[warn] KeyboardInterrupt detected. Safely stopping threads...")
-                # cancel_futures added in python 3.9 stops pending tasks cleanly
+                        progress_cb(completed, total, epi_title)
+            except (KeyboardInterrupt, RuntimeError) as e:
+                logger.warning(f"[warn] Fetch process interrupted gracefully: {e}")
+                for fut in future_to_idx:
+                    fut.cancel()
                 executor.shutdown(wait=False, cancel_futures=True)
                 raise
         return results
@@ -320,7 +389,7 @@ def request_with_retries(session: requests.Session, method: str, url: str, *,
                           headers=None, params=None, json=None, data=None,
                           timeout=30, max_retries=3, backoff=1.25,
                           allow_refresh=False, refresh_fn=None,
-                          login_fn=None, on_rate_limit=None):
+                          login_fn=None, on_rate_limit=None, cancel_event=None):
     """Generic request wrapper: retries on 5xx, 429, and network issues.
     If allow_refresh is True and the response indicates an expired token, invoke
     refresh_fn() followed by login_fn() if needed, then retry.
@@ -330,14 +399,17 @@ def request_with_retries(session: requests.Session, method: str, url: str, *,
     did_refresh = False
     did_login = False
     while attempt < max_retries:
+        if cancel_event and cancel_event.is_set():
+            raise RuntimeError("Request cancelled by request.")
+
         attempt += 1
         try:
             # Inject Cookie header (except for login endpoint) using session cookies
             try:
                 if "/v1/member/login" not in url:
-                    attach_auth_cookies(session, headers)
+                    headers = attach_auth_cookies(session, headers)
             except Exception as e:
-                print(f"Error occurred while attaching auth cookies: {e}")
+                logger.error(f"Error occurred while attaching auth cookies: {e}")
                 pass
 
             r = session.request(method, url, headers=headers, params=params, json=json, data=data, timeout=timeout)
@@ -346,14 +418,22 @@ def request_with_retries(session: requests.Session, method: str, url: str, *,
                 if on_rate_limit:
                     on_rate_limit()
                 wait = max(5.0, backoff ** (attempt + 2)) + random.uniform(0.5, 1.5)
-                time.sleep(wait)
+                steps = int(wait / 0.1)
+                for _ in range(steps):
+                    if cancel_event and cancel_event.is_set():
+                        raise RuntimeError("Request execution cancelled during throttle wait.")
+                    time.sleep(0.1)
                 continue
 
             if r.status_code >= 500:
                 if on_rate_limit:
                     on_rate_limit()
                 wait = max(5.0, backoff ** (attempt + 2)) + random.uniform(0.5, 1.5)
-                time.sleep(wait)
+                steps = int(wait / 0.1)
+                for _ in range(steps):
+                    if cancel_event and cancel_event.is_set():
+                        raise RuntimeError("Request execution cancelled during rate limit wait.")
+                    time.sleep(0.1)
                 continue
 
             # Handle auth refresh-and-retry for all endpoints except login/refresh
@@ -381,7 +461,7 @@ def request_with_retries(session: requests.Session, method: str, url: str, *,
                                 did_refresh = True
                                 success = True
                             except Exception:
-                                if const.HTTP_LOG: print("[api] Refresh failed.")
+                                if const.HTTP_LOG: logger.warning("[api] Refresh failed.")
                                 pass
                         
                         if not success and login_fn and not did_login:
@@ -390,26 +470,36 @@ def request_with_retries(session: requests.Session, method: str, url: str, *,
                                 did_login = True
                                 success = True
                             except Exception as e:
-                                if const.HTTP_LOG: print(f"[api] Re-login failed: {e}")
+                                if const.HTTP_LOG: logger.warning(f"[api] Re-login failed: {e}")
                                 pass
 
                         if success:
                             # Retry original request once
                             r = session.request(method, url, headers=headers, params=params, json=json, data=data, timeout=timeout)
                     except Exception as e:
-                        if const.HTTP_LOG: print(f"[api] Auth recovery failed: {e}")
+                        if const.HTTP_LOG: logger.error(f"[api] Auth recovery failed: {e}")
                         pass
 
             if r.status_code >= 500 and attempt < max_retries:
-                time.sleep(backoff ** attempt)
+                wait = backoff ** attempt
+                steps = int(wait / 0.1)
+                for _ in range(steps):
+                    if cancel_event and cancel_event.is_set():
+                        raise RuntimeError("Request execution cancelled during backoff sleep.")
+                    time.sleep(0.1)
                 continue
             return r
         except requests.RequestException as e:
             if const.HTTP_LOG:
-                print(f"[api] !! {method} {url} failed on attempt {attempt}: {e}")
+                logger.error(f"[api] !! {method} {url} failed on attempt {attempt}: {e}")
             last_exc = e
             if attempt < max_retries:
-                time.sleep(backoff ** attempt)
+                wait = backoff ** attempt
+                steps = int(wait / 0.1)
+                for _ in range(steps):
+                    if cancel_event and cancel_event.is_set():
+                        raise RuntimeError("Request execution cancelled during attempt sleep.")
+                    time.sleep(0.1)
                 continue
             raise
     if last_exc:
