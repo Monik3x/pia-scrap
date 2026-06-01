@@ -84,6 +84,11 @@ class PiaScrapGUI(ctk.CTk):
         self._create_left_panel()
         self._create_right_panel()
         self._create_library_panel()
+
+        self.current_page = 0
+        self.items_per_page = 50
+        self.library_dirs = []       # Master sorted folder list
+        self.filtered_dirs = []      # Subset after search query is applied
         
         self._load_saved_configurations()
         
@@ -224,20 +229,42 @@ class PiaScrapGUI(ctk.CTk):
         top_bar = ctk.CTkFrame(self.tab_library, fg_color="transparent")
         top_bar.grid(row=0, column=0, padx=15, pady=10, sticky="ew")
         top_bar.grid_columnconfigure(0, weight=1)
-        top_bar.grid_columnconfigure(1, weight=0)
+        top_bar.grid_columnconfigure(1, weight=1)
         top_bar.grid_columnconfigure(2, weight=0)
+        top_bar.grid_columnconfigure(3, weight=0)
         
-        lib_title = ctk.CTkLabel(top_bar, text="Local Download Directory Index", font=ctk.CTkFont(size=18, weight="bold"))
+        lib_title = ctk.CTkLabel(top_bar, text="Local Library", font=ctk.CTkFont(size=18, weight="bold"))
         lib_title.grid(row=0, column=0, sticky="w")
+
+        # Search input
+        self.search_var = ctk.StringVar()
+        self.search_var.trace_add("write", lambda *args: self.on_search_changed())
+        self.search_entry = ctk.CTkEntry(top_bar, placeholder_text="🔍 Search local novels...", textvariable=self.search_var)
+        self.search_entry.grid(row=0, column=1, padx=(10, 20), sticky="ew")
         
         self.update_all_btn = ctk.CTkButton(top_bar, text="Check & Update All", width=150, fg_color="#2B6CB0", hover_color="#2C5282", command=self.update_all_library)
-        self.update_all_btn.grid(row=0, column=1, padx=(0, 10), sticky="e")
+        self.update_all_btn.grid(row=0, column=2, padx=(0, 10), sticky="e")
         
-        refresh_btn = ctk.CTkButton(top_bar, text="Scan & Refresh Folder", width=160, fg_color="#4A5568", hover_color="#2D3748", command=self.refresh_library)
-        refresh_btn.grid(row=0, column=2, sticky="e")
+        refresh_btn = ctk.CTkButton(top_bar, text="Scan & Refresh Folder", width=160, fg_color="#4A5568", hover_color="#2D3748", command=self.full_scan_library)
+        refresh_btn.grid(row=0, column=3, sticky="e")
         
         self.library_scroll = ctk.CTkScrollableFrame(self.tab_library, label_text="Detected Local Novels")
-        self.library_scroll.grid(row=1, column=0, padx=15, pady=(0, 15), sticky="nsew")
+        self.library_scroll.grid(row=1, column=0, padx=15, pady=(0, 10), sticky="nsew")
+
+        # Pagination controls
+        self.pag_frame = ctk.CTkFrame(self.tab_library, fg_color="transparent")
+        self.pag_frame.grid(row=2, column=0, padx=15, pady=(0, 15), sticky="ew")
+        self.pag_frame.grid_columnconfigure((0, 2), weight=1)
+        self.pag_frame.grid_columnconfigure(1, weight=0)
+
+        self.prev_btn = ctk.CTkButton(self.pag_frame, text="◀ Previous", width=100, command=self.prev_page)
+        self.prev_btn.grid(row=0, column=0, sticky="w")
+
+        self.pag_label = ctk.CTkLabel(self.pag_frame, text="Page 1 of 1 (0 items)", font=ctk.CTkFont(size=13))
+        self.pag_label.grid(row=0, column=1, padx=20)
+
+        self.next_btn = ctk.CTkButton(self.pag_frame, text="Next ▶", width=100, command=self.next_page)
+        self.next_btn.grid(row=0, column=2, sticky="e")
 
     # ----------------------------
     # Helpers & UI Interactions
@@ -281,29 +308,72 @@ class PiaScrapGUI(ctk.CTk):
             self.refresh_library()
 
     def refresh_library(self):
-        """Scans output directory and lists matching subdirectories containing valid metadata profiles."""
+        """Map legacy calls from downstream modules to full_scan_library."""
+        self.full_scan_library()
+
+    def full_scan_library(self):
+        """Scans the directories instantly on disk. Does NOT load JSON metadata yet."""
+        out_dir = self.output_entry.get().strip() or "output"
+        if not os.path.exists(out_dir):
+            self.library_dirs = []
+            self.filtered_dirs = []
+            self.current_page = 0
+            self.display_current_page()
+            return
+            
+        try:
+            # Quick listdir (sub-millisecond even with k's of folders)
+            dirs = [d for d in os.listdir(out_dir) if os.path.isdir(os.path.join(out_dir, d)) and not d.startswith(".")]
+            self.library_dirs = sorted(dirs)
+        except Exception as e:
+            self.logger.error(f"Error reading library directory: {e}")
+            self.library_dirs = []
+
+        self.on_search_changed()
+
+    def on_search_changed(self):
+        """Filters the master list based on the search input query."""
+        query = self.search_var.get().strip().lower()
+        if not query:
+            self.filtered_dirs = self.library_dirs
+        else:
+            self.filtered_dirs = [d for d in self.library_dirs if query in d.lower()]
+        
+        self.current_page = 0
+        self.display_current_page()
+
+    def display_current_page(self):
+        """Renders only the current page of filtered items, reading JSON lazily."""
+        import re
+
         for widget in self.library_scroll.winfo_children():
             widget.destroy()
             
-        out_dir = self.output_entry.get().strip() or "output"
-        if not os.path.exists(out_dir):
-            no_dir_lbl = ctk.CTkLabel(self.library_scroll, text="Output directory target does not exist on disk yet.", font=ctk.CTkFont(style="italic"))
-            no_dir_lbl.pack(pady=20)
-            return
-        try:    
-            dirs = [d for d in os.listdir(out_dir) if os.path.isdir(os.path.join(out_dir, d)) and not d.startswith(".")]
-        except Exception as e:
-            self.logger.error(f"Error accessing output directory: {e}")
-            error_lbl = ctk.CTkLabel(self.library_scroll, text=f"Error accessing directory: {e}", font=ctk.CTkFont(style="italic"))
-            error_lbl.pack(pady=20)
-            return
-        
-        if not dirs:
-            empty_lbl = ctk.CTkLabel(self.library_scroll, text="No downloaded novel folders located inside target directory.", font=ctk.CTkFont(style="italic"))
+        total_items = len(self.filtered_dirs)
+        if total_items == 0:
+            empty_lbl = ctk.CTkLabel(self.library_scroll, text="No downloaded novel folders matching criteria.", font=ctk.CTkFont(style="italic"))
             empty_lbl.pack(pady=20)
+            self.pag_label.configure(text="Page 1 of 1 (0 items)")
+            self.prev_btn.configure(state="disabled")
+            self.next_btn.configure(state="disabled")
             return
-            
-        for item in sorted(dirs):
+
+        total_pages = (total_items + self.items_per_page - 1) // self.items_per_page
+        if self.current_page >= total_pages:
+            self.current_page = max(0, total_pages - 1)
+
+        start_idx = self.current_page * self.items_per_page
+        end_idx = min(start_idx + self.items_per_page, total_items)
+        page_slice = self.filtered_dirs[start_idx:end_idx]
+
+        # Update button states and total label
+        self.pag_label.configure(text=f"Page {self.current_page + 1} of {total_pages} (Novels {start_idx + 1}-{end_idx} of {total_items})")
+        self.prev_btn.configure(state="normal" if self.current_page > 0 else "disabled")
+        self.next_btn.configure(state="normal" if self.current_page < total_pages - 1 else "disabled")
+
+        out_dir = self.output_entry.get().strip() or "output"
+
+        for item in page_slice:
             item_path = os.path.join(out_dir, item)
             meta_path = os.path.join(item_path, "metadata.json")
             
@@ -329,9 +399,9 @@ class PiaScrapGUI(ctk.CTk):
                         if match:
                             novel_id = match.group(1)
                 except Exception as e:
-                    self.logger.error(f"Failed loading metadata card for {item}: {e}")
+                    self.logger.error(f"Failed loading metadata for {item}: {e}")
             
-            # Row frame
+            # Row layout container
             row = ctk.CTkFrame(self.library_scroll, corner_radius=6)
             row.pack(fill="x", padx=5, pady=4)
             
@@ -359,6 +429,18 @@ class PiaScrapGUI(ctk.CTk):
                 command=lambda nid=novel_id, fol=item: self.trigger_library_update(nid, fol)
             )
             update_btn.grid(row=0, column=3, padx=15, pady=10, sticky="e")
+
+    def prev_page(self):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.display_current_page()
+
+    def next_page(self):
+        total_items = len(self.filtered_dirs)
+        total_pages = (total_items + self.items_per_page - 1) // self.items_per_page
+        if self.current_page < total_pages - 1:
+            self.current_page += 1
+            self.display_current_page()
 
     def trigger_library_update(self, novel_id, folder_name):
         """Pushes target data back to download parameters tab and automatically starts processing updates."""
