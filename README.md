@@ -35,6 +35,10 @@ pip install -r requirements.txt
 python gui.py
 ```
 
+<img width="1270" height="959" alt="image" src="https://github.com/user-attachments/assets/4e802f78-0a73-49f6-8e01-35a9ef30fc5c" />
+
+---
+
 ### Command Line Interface
 
 ```bash
