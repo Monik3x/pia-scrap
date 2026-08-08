@@ -1,6 +1,6 @@
 # pia-scrap (Personal Fork)
 
-A fork of [pia-scrap](https://github.com/bayue48/pia-scrap) by bayue48, personalised for ease of updating/maintaining novels. Refer to the original for more details and troubleshooting. Modifications from the original were made with AI assistance.
+A fork of [pia-scrap](https://github.com/bayue48/pia-scrap) by bayue48, was personalised for ease of updating/maintaining novels back when the project was not being maintained and key features were missing. Check upstream, it will probably be more up to date and feature rich. Modifications from the original were heavily made with AI assistance. Updates are made whenever I pick up reading novels again. 
 
 > **Provided "as is", for personal use only. Use responsibly. Do not redistribute the content. Follow Novelpia's Terms of Service and Copyright.**
 
@@ -45,7 +45,7 @@ python gui.py
 python main.py NOVEL_ID [--user EMAIL] [--pass PASSWORD]
                [--out DIR] [--max-chapters N]
                [--lang en] [--proxy URL] [--throttle SECONDS]
-               [--debug] [--txt] [--update] [--threads]
+               [--debug] [--txt] [--update] [--threads N]
 ```
 
 ### CLI Arguments
@@ -58,8 +58,8 @@ python main.py NOVEL_ID [--user EMAIL] [--pass PASSWORD]
 | `--max-chapters` | Fetch up to N episodes (`0` or unset = all) |
 | `--lang` | EPUB language code (default: `en`) |
 | `--proxy` | HTTP/HTTPS proxy, e.g. `http://host:port` |
-| `--throttle` | Seconds to wait between episode/ticket/content calls (default: `2.0`) |
-| `--debug` | Verbose request logs and optional JSON dumps for failures |
+| `--throttle` | Seconds to wait between episode/ticket/content calls (default: `2.0`; `0` disables the delay) |
+| `--debug` | Verbose diagnostics and request failure logs |
 | `--txt` | Export as `.txt` per episode instead of EPUB |
 | `--update` | Generate/access a local cache to update existing EPUBs without redownloading older chapters | 
 | `--threads` | Number of workers sending requests, recommended to leave as is (default: `1`) |
@@ -101,7 +101,7 @@ Files are written to `output/<title>/`:
 ```text
 output/<title>/<title>.epub
 output/<title>/<episode-title>.txt   # if --txt is used
-output/<title>/.raw_cache/           # if --update is used
+output/<title>/.raw_cache/           # episode and image cache if --update is used
 ```
 ---
 

@@ -3,6 +3,8 @@ import json
 import os
 import re
 import logging
+import tempfile
+import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urljoin, urlparse
 from src.const import BASE_URL, CONFIG_PATH, IMG_BASE_HTTPS
@@ -22,10 +24,11 @@ def sanitize_filename(name: str) -> str:
 def normalize_url(u: str) -> str:
     if not u:
         return u
+    u = u.strip()
     if u.startswith("//"):
         return IMG_BASE_HTTPS + u
-    if u.startswith("/"):
-        return urljoin(BASE_URL, u)
+    if not urlparse(u).scheme:
+        return urljoin(f"{BASE_URL}/", u)
     return u
 
 def media_type_from_ext(ext: str) -> str:
@@ -38,7 +41,27 @@ def media_type_from_ext(ext: str) -> str:
         return "image/gif"
     if ext == ".webp":
         return "image/webp"
+    if ext == ".svg":
+        return "image/svg+xml"
     return "image/jpeg"
+
+def image_type(data: bytes, fallback_ext: str = ".jpg") -> Tuple[str, str]:
+    """Return a safe EPUB extension and media type based on image contents."""
+    if data.startswith(b"\xff\xd8\xff"):
+        ext = ".jpg"
+    elif data.startswith(b"\x89PNG\r\n\x1a\n"):
+        ext = ".png"
+    elif data.startswith((b"GIF87a", b"GIF89a")):
+        ext = ".gif"
+    elif len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        ext = ".webp"
+    elif b"<svg" in data[:512].lower():
+        ext = ".svg"
+    else:
+        ext = fallback_ext.lower()
+        if ext not in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg"):
+            ext = ".jpg"
+    return ext, media_type_from_ext(ext)
 
 def looks_like_jwt(token: Optional[str]) -> bool:
     if not isinstance(token, str):
@@ -53,10 +76,84 @@ def looks_like_jwt(token: Optional[str]) -> bool:
             return False
     return True
 
-def kebab(s: str) -> str:
-    s = (s or "").lower()
-    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
-    return s or "book"
+def kebab(s: str, fallback: str = "book") -> str:
+    """Create a readable, Unicode-safe directory name."""
+    normalized = unicodedata.normalize("NFKC", s or "").casefold()
+    slug = re.sub(r"[\W_]+", "-", normalized, flags=re.UNICODE).strip("-")
+    slug = slug or fallback
+    if slug.upper() in {
+        "CON", "PRN", "AUX", "NUL",
+        *(f"COM{i}" for i in range(1, 10)),
+        *(f"LPT{i}" for i in range(1, 10)),
+    }:
+        slug = f"_{slug}"
+    return slug
+
+def book_base(out_dir: str, title: str, novel_id: int) -> str:
+    """Choose a readable book directory without overwriting a different novel."""
+    novel_id = int(novel_id)
+    base = kebab(title, fallback=f"novel-{novel_id}")
+    book_dir = os.path.join(out_dir, base)
+    if not os.path.isdir(book_dir):
+        return base
+
+    existing_id = None
+    marker_path = os.path.join(book_dir, ".novel_id")
+    try:
+        with open(marker_path, "r", encoding="ascii") as marker_file:
+            existing_id = marker_file.read().strip() or None
+    except OSError:
+        pass
+
+    meta_path = os.path.join(book_dir, "metadata.json")
+    if existing_id is None:
+        try:
+            with open(meta_path, "r", encoding="utf-8") as meta_file:
+                metadata = json.load(meta_file)
+            existing_id = metadata.get("novel_id")
+            if not existing_id:
+                match = re.search(r"/novel/(\d+)", str(metadata.get("url") or ""))
+                existing_id = match.group(1) if match else None
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            pass
+
+    if existing_id is not None:
+        try:
+            if int(existing_id) == novel_id:
+                return base
+        except (TypeError, ValueError):
+            pass
+    return f"{base}-{novel_id}"
+
+def unique_in_order(values: List[int]) -> List[int]:
+    seen = set()
+    unique = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            unique.append(value)
+    return unique
+
+def write_text_atomic(path, value: str) -> None:
+    """Write text without exposing readers to a partially written file."""
+    path = os.fspath(path)
+    directory = os.path.dirname(os.path.abspath(path))
+    ensure_dir(directory)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=directory, prefix=".tmp-", delete=False
+        ) as temp_file:
+            temp_path = temp_file.name
+            temp_file.write(value)
+        os.replace(temp_path, path)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+
+def write_json_atomic(path, value: Any, *, indent: Optional[int] = None) -> None:
+    """Serialize and atomically write a JSON value."""
+    write_text_atomic(path, json.dumps(value, ensure_ascii=False, indent=indent))
 
 # ----------------------------
 # Config management
@@ -66,7 +163,10 @@ def load_config() -> Dict[str, Any]:
     try:
         if os.path.exists(CONFIG_PATH):
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                return json.load(f) or {}
+                config = json.load(f)
+            if isinstance(config, dict):
+                return config
+            logger.warning(f"Ignoring invalid config structure in {CONFIG_PATH}.")
     except Exception as e:
         logger.error(f"Error occurred while loading config: {e}")
         return {}
@@ -74,11 +174,9 @@ def load_config() -> Dict[str, Any]:
 
 def save_config(cfg: Dict[str, Any]) -> None:
     try:
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        write_json_atomic(CONFIG_PATH, cfg, indent=2)
     except Exception as e:
         logger.error(f"Error occurred while saving config: {e}")
-        pass
 
 # ----------------------------
 # Auth token management & header merging
@@ -90,45 +188,6 @@ def merge_login_at(headers: dict, login_at: Optional[str]) -> dict:
         h["login-at"] = login_at
     return h
 
-def _mask_value(v: Any) -> Any:
-    try:
-        if isinstance(v, dict):
-            return {k: _mask_value(v2) for k, v2 in v.items()}
-        if isinstance(v, list):
-            return [_mask_value(x) for x in v]
-        if isinstance(v, str):
-            low = v.lower()
-            if low.count(".") == 2 and all(len(p) > 5 for p in v.split(".")):
-                parts = v.split(".")
-                return parts[0][:6] + "..." + parts[-1][-6:]
-            if len(v) > 64:
-                return v[:32] + "…(trunc)"
-            return v
-        return v
-    except Exception:
-        return "<masked>"
-
-def _mask_kv(d: Optional[dict]) -> Optional[dict]:
-    if not isinstance(d, dict):
-        return d
-    out = {}
-    for k, v in d.items():
-        kl = str(k).lower()
-        if any(x in kl for x in (
-            "pass", "passwd", "password", "authorization", "token",
-            "login-at", "login_at", "_t", "cookie", "set-cookie"
-        )):
-            out[k] = "***"
-        else:
-            out[k] = _mask_value(v)
-    return out
-
-def _j(x: Any) -> str:
-    try:
-        return json.dumps(x, ensure_ascii=False)
-    except Exception:
-        return str(x)
-    
 def attach_auth_cookies(session, headers=None):
     ck = getattr(session, "cookies", None)
     if ck is None:
@@ -227,8 +286,6 @@ def extract_t_token(tdata: dict) -> Tuple[Optional[str], Optional[str]]:
 def parse_range(range_str: str) -> List[int]:
     """Parses mixed strings like '100', '100-105', or '47,50,51-55' into a list of integers."""
     result = []
-    
-    # Split by commas first
     parts = str(range_str).strip().split(',')
     
     for part in parts:
@@ -241,16 +298,22 @@ def parse_range(range_str: str) -> List[int]:
                 start_s, end_s = part.split("-", 1)
                 start = int(start_s.strip())
                 end = int(end_s.strip())
-                # Add all numbers in the range (inclusive)
-                result.extend(range(start, end + 1))
-            except ValueError:
-                raise ValueError(f"Invalid range format: {part}. Use 'start-end' (e.g., 100-105).")
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid range format: {part}. Use 'start-end' (e.g., 100-105)."
+                ) from exc
+            if start <= 0 or end <= 0:
+                raise ValueError("Novel IDs must be positive integers.")
+            if start > end:
+                raise ValueError(f"Range start must not exceed range end: {part}")
+            result.extend(range(start, end + 1))
         else:
             try:
-                result.append(int(part))
-            except ValueError:
-                raise ValueError(f"Invalid ID: {part}")
-                
-    # Remove duplicates while preserving the order they were entered
-    seen = set()
-    return [x for x in result if not (x in seen or seen.add(x))]
+                novel_id = int(part)
+            except ValueError as exc:
+                raise ValueError(f"Invalid ID: {part}") from exc
+            if novel_id <= 0:
+                raise ValueError("Novel IDs must be positive integers.")
+            result.append(novel_id)
+
+    return unique_in_order(result)

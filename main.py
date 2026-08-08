@@ -1,6 +1,5 @@
 import argparse
 import sys
-import os
 import logging
 from dotenv import load_dotenv
 from src.engine import ScraperEngine
@@ -12,7 +11,7 @@ from src import const
 
 def main():
     load_dotenv()
-    ap = argparse.ArgumentParser(description="Novelpia → EPUB packer (API)")
+    ap = argparse.ArgumentParser(description="Novelpia to EPUB packer (API)")
     ap.add_argument("novel_ids", help="Novel ID (e.g. 1072) or Range (e.g. 1000-1050) or mixed strings (47,49,51-55)")
     ap.add_argument("--user", "--email", "-u", "-e", dest="email", help="Novelpia email (overrides config tokens if provided)")
     ap.add_argument("--pass", "--password", "-p", dest="password", help="Novelpia password (overrides config tokens if provided)")
@@ -20,12 +19,21 @@ def main():
     ap.add_argument("--max-chapters", "-max", type=int, default=0, help="Fetch up to N chapters (0 = all)")
     ap.add_argument("--lang", default="en", help="EPUB language code (default: en)")
     ap.add_argument("--proxy", default=None, help="HTTP/HTTPS proxy, e.g. http://host:port")
-    ap.add_argument("--debug", "-v", action="store_true", help="Enable verbose HTTP request/response logs and extra diagnostics")
-    ap.add_argument("--throttle", type=float, default=1.5, help="Seconds delay between episode requests (default: 2.0)")
+    ap.add_argument("--debug", "-v", action="store_true", help="Enable verbose diagnostics and request-failure logs")
+    ap.add_argument("--throttle", type=float, default=1.5, help="Seconds delay between episode requests (default: 1.5; 0 disables)")
     ap.add_argument("--txt", "-txt", action="store_true", help="Output plain .txt files per episode instead of EPUB")
     ap.add_argument("--update", action="store_true", help="Only download new chapters and update existing EPUB via local cache")
     ap.add_argument("--threads", type=int, default=1, help="Number of workers sending requests (default: 1), recommended to leave as is")
     args = ap.parse_args()
+
+    if args.max_chapters < 0:
+        ap.error("--max-chapters must be zero or greater")
+    if args.throttle < 0:
+        ap.error("--throttle must be zero or greater")
+    if args.threads < 1:
+        ap.error("--threads must be at least 1")
+    if bool(args.email) != bool(args.password):
+        ap.error("provide both --user and --pass, or neither to use stored tokens")
 
     # Configure Logging based on debug mode
     log_level = logging.DEBUG if args.debug else logging.INFO
