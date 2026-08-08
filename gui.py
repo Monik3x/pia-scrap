@@ -1,5 +1,4 @@
 import os
-import sys
 import re
 import json
 import queue
@@ -276,7 +275,7 @@ class PiaScrapGUI(ctk.CTk):
             self.output_entry.insert(0, dir_path)
 
     def on_threads_warning(self, val):
-        if int(val) > 2:
+        if int(val) > 1:
             self.append_to_log("[GUI-WARN] Choosing > 1 threads increases the risk of triggering Novelpia's strict IP rate-limits (HTTP 429). Leave at 1 for best results.")
 
     def import_from_env(self):
@@ -344,8 +343,6 @@ class PiaScrapGUI(ctk.CTk):
 
     def display_current_page(self):
         """Renders only the current page of filtered items, reading JSON lazily."""
-        import re
-
         for widget in self.library_scroll.winfo_children():
             widget.destroy()
             
@@ -391,10 +388,13 @@ class PiaScrapGUI(ctk.CTk):
                     title = meta.get("title") or title
                     author = meta.get("author") or author
                     chapters = str(meta.get("chapter", "0"))
-                    status = meta.get("status") or status
-                    
-                    url = meta.get("url", "")
-                    if url:
+                    status = str(meta.get("status") or status)
+
+                    stored_id = meta.get("novel_id")
+                    if stored_id and int(stored_id) > 0:
+                        novel_id = str(int(stored_id))
+                    else:
+                        url = meta.get("url", "")
                         match = re.search(r'/novel/(\d+)', url)
                         if match:
                             novel_id = match.group(1)
@@ -426,7 +426,8 @@ class PiaScrapGUI(ctk.CTk):
                 width=110, 
                 fg_color="#2B6CB0", 
                 hover_color="#2C5282",
-                command=lambda nid=novel_id, fol=item: self.trigger_library_update(nid, fol)
+                state="normal" if novel_id else "disabled",
+                command=lambda nid=novel_id: self.trigger_library_update(nid)
             )
             update_btn.grid(row=0, column=3, padx=15, pady=10, sticky="e")
 
@@ -442,12 +443,13 @@ class PiaScrapGUI(ctk.CTk):
             self.current_page += 1
             self.display_current_page()
 
-    def trigger_library_update(self, novel_id, folder_name):
+    def trigger_library_update(self, novel_id):
         """Pushes target data back to download parameters tab and automatically starts processing updates."""
-        target_id = str(novel_id) if novel_id else folder_name # Cope
-        
+        if not novel_id:
+            messagebox.showerror("Missing Novel ID", "This folder's metadata does not contain a valid Novel ID.")
+            return
         self.ids_entry.delete(0, "end")
-        self.ids_entry.insert(0, target_id)
+        self.ids_entry.insert(0, str(novel_id))
         
         self.update_switch.select()
         
@@ -475,15 +477,16 @@ class PiaScrapGUI(ctk.CTk):
                 try:
                     with open(meta_path, "r", encoding="utf-8") as f:
                         meta = json.load(f)
-                    url = meta.get("url", "")
-                    if url:
+                    nid = meta.get("novel_id")
+                    if not nid:
+                        url = meta.get("url", "")
                         match = re.search(r'/novel/(\d+)', url)
                         if match:
                             nid = match.group(1)
-                        if nid:
-                            valid_ids.append(str(nid))
-                except Exception:
-                    pass
+                    if nid and int(nid) > 0:
+                        valid_ids.append(str(int(nid)))
+                except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    self.logger.warning(f"Could not read Novel ID from {meta_path}: {exc}")
         
         if not valid_ids:
             messagebox.showwarning("No IDs Found", "Could not locate valid Novel IDs inside the metadata logs of your local library folders.")
@@ -534,6 +537,10 @@ class PiaScrapGUI(ctk.CTk):
     # Thread Processing Loop
     # ----------------------------
     def start_scraper(self):
+        if self.worker_thread and self.worker_thread.is_alive():
+            messagebox.showwarning("Download in progress", "Wait for the current download or cancel it first.")
+            return
+
         ids_raw = self.ids_entry.get().strip()
         if not ids_raw:
             messagebox.showerror("Validation Error", "Please input a valid Novel ID, range (e.g., 100-110), or 'library'.")
@@ -541,6 +548,12 @@ class PiaScrapGUI(ctk.CTk):
             
         email = self.email_entry.get().strip() or None
         password = self.pass_entry.get().strip() or None
+        if bool(email) != bool(password):
+            messagebox.showerror(
+                "Authentication Error",
+                "Enter both email and password, or leave both blank to use stored tokens."
+            )
+            return
         out_dir = self.output_entry.get().strip() or "output"
         txt_mode = (self.format_var.get() == "TXT")
         proxy = self.proxy_entry.get().strip() or None
@@ -551,6 +564,12 @@ class PiaScrapGUI(ctk.CTk):
             threads = int(self.threads_box.get())
         except ValueError as e:
             messagebox.showerror("Configuration Error", f"Failed parsing numerical settings. Check Max Chapters / Delay values.\n({e})")
+            return
+        if max_chapters < 0 or throttle < 0 or threads < 1:
+            messagebox.showerror(
+                "Configuration Error",
+                "Max Chapters and Delay must be zero or greater; Threads must be at least 1."
+            )
             return
             
         lang = self.lang_entry.get().strip() or "en"
@@ -604,17 +623,16 @@ class PiaScrapGUI(ctk.CTk):
                 return
                 
             if self.cancel_event.is_set():
-                self.gui_queue.put(("status", "Download cancelled by user."))
+                self.gui_queue.put(("done", {"success": 0, "skipped": 0, "failed": 0, "results": []}))
                 return
                 
             self.gui_queue.put(("status", "Resolving novel IDs..."))
             target_ids = engine.resolve_novel_ids(ids_raw)
+            if self.cancel_event.is_set():
+                self.gui_queue.put(("done", {"success": 0, "skipped": 0, "failed": 0, "results": []}))
+                return
             if not target_ids:
                 self.gui_queue.put(("error", f"No valid novels found for: {ids_raw}. Ensure library works or confirm IDs are valid."))
-                return
-                
-            if self.cancel_event.is_set():
-                self.gui_queue.put(("status", "Download cancelled by user."))
                 return
                 
             summary = engine.run_download_queue(target_ids)
@@ -622,6 +640,9 @@ class PiaScrapGUI(ctk.CTk):
             self.gui_queue.put(("done", summary))
             
         except Exception as e:
+            if self.cancel_event.is_set():
+                self.gui_queue.put(("done", {"success": 0, "skipped": 0, "failed": 0, "results": []}))
+                return
             tb_msg = "".join(traceback.format_exception(type(e), e, e.__traceback__))
             self.gui_queue.put(("error", f"An exception occurred inside the background thread:\n{e}\n\n{tb_msg}"))
 
@@ -662,9 +683,17 @@ class PiaScrapGUI(ctk.CTk):
             self.append_to_log("--- Process Cancelled ---")
             messagebox.showinfo("Cancelled", "Download queue was cancelled.")
         else:
-            self.status_label.configure(text="Status: Completed!")
-            self.append_to_log(f"\n--- Process Complete ---\nSuccessful: {summary['success']}...")
-            messagebox.showinfo("All completed", f"Succeeded: {summary['success']}...")
+            success = summary["success"]
+            skipped = summary["skipped"]
+            failed = summary["failed"]
+            details = f"Succeeded: {success} | Up to date: {skipped} | Failed: {failed}"
+            self.append_to_log(f"\n--- Process Complete ---\n{details}")
+            if failed:
+                self.status_label.configure(text="Status: Completed with errors")
+                messagebox.showwarning("Completed with errors", details)
+            else:
+                self.status_label.configure(text="Status: Completed!")
+                messagebox.showinfo("All completed", details)
         
         self._reset_ui()
         self.refresh_library()

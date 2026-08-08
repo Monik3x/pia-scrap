@@ -6,16 +6,6 @@ A fork of [pia-scrap](https://github.com/bayue48/pia-scrap) by bayue48, was pers
 
 ---
 
-## New Features
-
-- **Queueing** — supports downloading sequential ranges of novels automatically with better formatting
-- **Improved threading** - added thread stagger, implemented safe KeyboardInterrupt and GUI thread cancellation, reduced aggressive throttle penalty
-- **Image scraping actually works** - injects necessary CloudFront keys to download images
-- **Library access** — special NOVEL_ID argument to download favorited novels
-- **Graphical User Interface** — an easier to use UI with a built-in local library manager
-
----
-
 ## Requirements
 
 - Python 3.9+
