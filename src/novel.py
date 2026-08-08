@@ -12,49 +12,50 @@ def html_from_episode_text(raw_html: str) -> str:
     soup = BeautifulSoup(raw_html or "", "html.parser")
 
     for img in soup.find_all("img"):
-        if img.get("data-src") and not img.get("src"):
-            img["src"] = img["data-src"]
+        lazy_src = img.get("data-src") or img.get("data-original") or img.get("data-lazy-src")
+        if lazy_src:
+            img["src"] = lazy_src
         if "style" in img.attrs:
             del img["style"]
+        for attribute in ("srcset", "data-srcset"):
+            if attribute in img.attrs:
+                del img[attribute]
         if img.get("src"):
             img["src"] = normalize_url(img["src"])
 
     # Return just the clean inner HTML, without forcing an <html> wrapper
     return "".join(str(tag) for tag in soup.contents)
 
-def fetch_novel_and_episodes(client, novel_id, start_chapter=None, end_chapter=None, max_chapters=None):
-    # Auth check
-    try:
-        res = client.me()
-        if str(res.get("statusCode")) == "200":
-            mem = (((res.get("result") or {}).get("login") or {}).get("mem_nick")) or "Unknown"
-            logger.info(f"[auth] Logged in as: {mem}")
-        else:
-            logger.warning(f"[auth] Authentication validation returned code {res.get('statusCode')}: {res.get('errmsg')}")
-    except Exception as e:
-        logger.warning(f"[auth] Stored credentials could not be verified: {e}. If your session has expired, try logging in again using your email and password.")
-
+def fetch_novel_and_episodes(client, novel_id, max_chapters=None):
     logger.info("extracting metadata…")
     data_novel = client.novel(novel_id)
 
-    nv = data_novel["result"]["novel"]
-    title = nv.get("novel_name", f"novel_{novel_id}")
-    epi_cnt = data_novel["result"].get("info", {}).get("epi_cnt") or nv.get("count_epi") or 0
-    writers = data_novel["result"].get("writer_list") or []
+    result = data_novel.get("result")
+    if not isinstance(result, dict) or not isinstance(result.get("novel"), dict):
+        raise ValueError(f"Novel {novel_id} returned no metadata.")
+
+    nv = result["novel"]
+    title = nv.get("novel_name") or f"novel_{novel_id}"
+    info = result.get("info") or {}
+    if not isinstance(info, dict):
+        info = {}
+    epi_cnt = info.get("epi_cnt") or nv.get("count_epi") or 0
+    writers = result.get("writer_list") or []
     author = (writers[0].get("writer_name") if writers and writers[0].get("writer_name") else "Unknown Author")
     status = "Completed" if str(nv.get("flag_complete", 0)) == "1" else "Ongoing"
-    
+
     logger.info(f"title='{title}' author='{author}' chapter={epi_cnt} status={status}")
 
     rows = int(epi_cnt) if epi_cnt else 1000
     data_list = client.episode_list(novel_id, rows=rows)
-    ep_list = data_list["result"].get("list", [])
-
-    # Handle range
-    if start_chapter:
-        ep_list = [ep for ep in ep_list if int(ep.get("epi_num", 0)) >= int(start_chapter)]
-    if end_chapter:
-        ep_list = [ep for ep in ep_list if int(ep.get("epi_num", 0)) <= int(end_chapter)]
+    if not isinstance(data_list, dict):
+        raise ValueError(f"Novel {novel_id} returned an invalid episode response.")
+    list_result = data_list.get("result") or {}
+    if not isinstance(list_result, dict):
+        raise ValueError(f"Novel {novel_id} returned an invalid episode response.")
+    ep_list = list_result.get("list") or []
+    if not isinstance(ep_list, list):
+        raise ValueError(f"Novel {novel_id} returned an invalid episode list.")
 
     if max_chapters:
         ep_list = ep_list[:int(max_chapters)]

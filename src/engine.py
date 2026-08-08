@@ -1,6 +1,5 @@
 import logging
 import os
-import time
 import threading
 from typing import List, Optional, Callable, Dict, Any
 from src.api import NovelpiaClient
@@ -21,14 +20,21 @@ class ScraperEngine:
         self.email = email
         self.password = password
         self.proxy = proxy
-        self.throttle = throttle
+        self.throttle = float(throttle)
         self.out_dir = out_dir
         self.language = language
-        self.max_chapters = max_chapters
-        self.threads = threads
+        self.max_chapters = int(max_chapters)
+        self.threads = int(threads)
         self.txt_mode = txt_mode
         self.update_mode = update_mode
         self.debug_mode = debug_mode
+
+        if self.throttle < 0:
+            raise ValueError("Throttle must be zero or greater.")
+        if self.max_chapters < 0:
+            raise ValueError("Max chapters must be zero or greater.")
+        if self.threads < 1:
+            raise ValueError("Threads must be at least 1.")
 
         if self.debug_mode:
             logging.getLogger("pia_scrap").setLevel(logging.DEBUG)
@@ -78,7 +84,7 @@ class ScraperEngine:
                 self.client.login()
             except Exception as e:
                 self.update_status(f"Login failed: {e}")
-                raise e
+                raise
 
             userkey_val = None
             tkey_val = None
@@ -149,8 +155,6 @@ class ScraperEngine:
                         novel_id=novel_id,
                         out_dir=self.out_dir,
                         max_chapters=(self.max_chapters if self.max_chapters > 0 else None),
-                        language=self.language,
-                        debug_dump=self.debug_mode,
                         threads=self.threads,
                         progress_cb=self.update_progress,
                         status_cb=self.update_status
@@ -166,7 +170,6 @@ class ScraperEngine:
                         out_dir=self.out_dir,
                         max_chapters=(self.max_chapters if self.max_chapters > 0 else None),
                         language=self.language,
-                        debug_dump=self.debug_mode,
                         update_mode=self.update_mode,
                         threads=self.threads,
                         progress_cb=self.update_progress,
@@ -184,18 +187,19 @@ class ScraperEngine:
                         results_summary.append({"novel_id": novel_id, "status": "success", "title": title, "count": count, "type": "epub"})
                         success_count += 1
 
-            except RuntimeError as e:
+            except Exception as e:
                 if self.cancel_event and self.cancel_event.is_set():
                     self.update_status(f"[cancelled] Stopped processing {novel_id} due to user cancellation.")
                     break
 
-            except Exception as e:
                 err_str = str(e)
-                if "NoneType" in err_str or "KeyError" in err_str:
-                    warn_msg = f"Novel {novel_id} likely does not exist or has no data. Skipping."
+                response = getattr(e, "response", None)
+                status_code = getattr(response, "status_code", None)
+                if isinstance(e, ValueError) and "returned no metadata" in err_str:
+                    warn_msg = f"Novel {novel_id} does not exist or has no metadata. Skipping."
                     self.update_status(f"[warn] {warn_msg}")
                     results_summary.append({"novel_id": novel_id, "status": "not_exist"})
-                elif hasattr(e, "response") and e.response and e.response.status_code == 404:
+                elif status_code == 404:
                     warn_msg = f"Novel {novel_id} returned 404. Skipping."
                     self.update_status(f"[warn] {warn_msg}")
                     results_summary.append({"novel_id": novel_id, "status": "404"})
@@ -206,10 +210,7 @@ class ScraperEngine:
                     results_summary.append({"novel_id": novel_id, "status": "failed", "error": err_str})
                 
                 fail_count += 1
-                if self.client:
-                    self.client.sleep_cooperative(1.0)
-                else:
-                    time.sleep(1.0)
+                self.client.sleep_cooperative(1.0)
 
         summary_msg = f"Finished queue. Success: {success_count}, Skipped (Up to date): {skipped_count}, Failed/No Data: {fail_count}"
         self.update_status(f"[done] {summary_msg}")
