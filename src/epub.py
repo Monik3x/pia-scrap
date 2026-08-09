@@ -11,17 +11,16 @@ from ebooklib import epub
 from tqdm import tqdm
 from src.api import NovelpiaClient
 from src.const import BASE_URL, IMAGE_HOST_COOKIE_POLICY, SIGNED_IMAGE_COOKIE_NAMES
-from src.novel import html_from_episode_text
 from src.helper import (
-    book_base,
+    book_output_paths,
     ensure_dir,
     image_type,
     is_approved_image_url,
-    kebab,
     normalize_url,
     write_json_atomic,
     write_text_atomic,
 )
+from src.novel import html_from_episode_text, parse_novel_metadata
 
 logger = logging.getLogger("pia_scrap")
 
@@ -110,26 +109,22 @@ class EpubBuilder:
               author_fallback: str = "Unknown", css_text: Optional[str] = None,
               novel_id: Optional[int] = None, update_mode: bool = False, threads: int = 1,
               progress_cb: Optional[Callable[[int, int, str], None]] = None) -> Tuple[str, str, int]:
-        nv = novel["result"]["novel"]
-        title = nv.get("novel_name") or f"novel_{nv.get('novel_no', '')}"
-        writers = novel["result"].get("writer_list") or []
-        author = (writers[0].get("writer_name") if writers and writers[0].get("writer_name") else author_fallback)
-        status = "Completed" if str(nv.get("flag_complete", 0)) == "1" else "Ongoing"
-        description = (nv.get("novel_story") or "").strip()
-
-        resolved_novel_id = novel_id or nv.get("novel_no")
-        if resolved_novel_id is None:
-            base = kebab(filename_hint or title)
-        else:
-            base = book_base(self.out_dir, filename_hint or title, resolved_novel_id)
-        book_dir = os.path.join(self.out_dir, base)
+        metadata = parse_novel_metadata(novel, novel_id, author_fallback)
+        novel_fields = metadata.novel
+        title = metadata.title
+        author = metadata.author
+        status = metadata.status
+        description = metadata.description
+        resolved_novel_id = metadata.novel_id
+        paths = book_output_paths(self.out_dir, filename_hint or title, resolved_novel_id)
+        book_dir = paths.book_dir
         ensure_dir(book_dir)
         if resolved_novel_id is not None:
-            write_text_atomic(os.path.join(book_dir, ".novel_id"), str(resolved_novel_id))
+            write_text_atomic(paths.novel_id_path, str(resolved_novel_id))
 
         # --- Setup Cache Directory ---
-        cache_dir = os.path.join(book_dir, ".raw_cache")
-        image_cache_dir = os.path.join(cache_dir, "images")
+        cache_dir = paths.cache_dir
+        image_cache_dir = paths.image_cache_dir
         if update_mode:
             ensure_dir(cache_dir)
             ensure_dir(image_cache_dir)
@@ -168,13 +163,15 @@ class EpubBuilder:
             return image_bytes
 
         book = epub.EpubBook()
-        book.set_identifier(f"novelpia-{nv.get('novel_no')}")
+        book.set_identifier(f"novelpia-{metadata.novel_id}")
         book.set_title(title)
         book.set_language(language)
         book.add_author(author)
 
         # Cover
-        cover_url = normalize_url(nv.get("novel_full_img") or nv.get("novel_img") or "")
+        cover_url = normalize_url(
+            novel_fields.get("novel_full_img") or novel_fields.get("novel_img") or ""
+        )
         novel_referer = f"{BASE_URL}/novel/{resolved_novel_id}" if resolved_novel_id else f"{BASE_URL}/"
         cover_bytes = fetch_cached_image(cover_url, referer_url=novel_referer) if cover_url else None
         has_cover = False
@@ -404,7 +401,7 @@ class EpubBuilder:
         # Spine & CSS
         book.spine = spine
 
-        out_path = os.path.join(book_dir, f"{base}.epub")
+        out_path = paths.epub_path
         temp_path = out_path + ".tmp"
         try:
             epub.write_epub(temp_path, book, {})

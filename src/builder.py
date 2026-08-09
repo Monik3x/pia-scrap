@@ -2,13 +2,13 @@ import json
 import os
 import logging
 import zipfile
-from typing import List, Optional, Callable
+from typing import Optional, Callable
 
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 from src.epub import EpubBuilder
-from src.helper import book_base, ensure_dir, sanitize_filename, write_json_atomic, write_text_atomic
-from src.novel import fetch_novel_and_episodes
+from src.helper import book_output_paths, ensure_dir, sanitize_filename, write_json_atomic, write_text_atomic
+from src.novel import fetch_novel_and_episodes, parse_novel_metadata
 
 logger = logging.getLogger("pia_scrap")
 
@@ -34,12 +34,12 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
     if status_cb:
         status_cb("Fetching novel metadata and episode list...")
     data_novel, ep_list, title = fetch_novel_and_episodes(client, novel_id, max_chapters=max_chapters)
-    base = book_base(out_dir, title, novel_id)
-    book_dir = os.path.join(out_dir, base)
+    paths = book_output_paths(out_dir, title, novel_id)
+    book_dir = paths.book_dir
 
     if update_mode:
-        meta_path = os.path.join(book_dir, "metadata.json")
-        epub_path = os.path.join(book_dir, f"{base}.epub")
+        meta_path = paths.metadata_path
+        epub_path = paths.epub_path
         
         if os.path.exists(meta_path) and os.path.exists(epub_path):
             try:
@@ -96,8 +96,8 @@ def build_txt(client, novel_id, out_dir, max_chapters=None, threads=1,
         status_cb("Fetching novel metadata and episode list...")
     data_novel, ep_list, title = fetch_novel_and_episodes(client, novel_id, max_chapters)
 
-    base = book_base(out_dir, title, novel_id)
-    book_dir = os.path.join(out_dir, base)
+    paths = book_output_paths(out_dir, title, novel_id)
+    book_dir = paths.book_dir
 
     total = len(ep_list)
     pbar = None
@@ -156,43 +156,17 @@ def build_txt(client, novel_id, out_dir, max_chapters=None, threads=1,
     return book_dir, title, len(fetched_results)
 
 def build_metadata(book_dir, data_novel, novel_id, ep_list):
-    nv = data_novel["result"]["novel"]
-    title = nv.get("novel_name") or f"novel_{nv.get('novel_no', '')}"
-
-    writers = data_novel["result"].get("writer_list") or []
-    author = (writers[0].get("writer_name") if writers and writers[0].get("writer_name") else "Unknown Author")
-    status = "Completed" if str(nv.get("flag_complete", 0)) == "1" else "Ongoing"
-    description = (nv.get("novel_story") or "").strip()
-    
-    # Tags can be in result.tag_list or novel.tag_list, accept str or dict with name fields
-    tag_items = (data_novel.get("result", {}).get("tag_list")
-                 or nv.get("tag_list")
-                 or [])
-    tags: List[str] = []
-    for t in tag_items:
-        if isinstance(t, str):
-            tags.append(t)
-        elif isinstance(t, dict):
-            val = t.get("tag_name") or t.get("name") or t.get("title")
-            if isinstance(val, str):
-                tags.append(val)
-
-    seen = set()
-    uniq_tags = []
-    for t in tags:
-        if t not in seen:
-            seen.add(t)
-            uniq_tags.append(t)
+    metadata = parse_novel_metadata(data_novel, novel_id)
 
     meta = {
         "url": f"https://global.novelpia.com/novel/{novel_id}",
-        "novel_id": int(novel_id),
-        "title": nv.get("novel_name") or title,
-        "author": author,
-        "tags": uniq_tags,
+        "novel_id": metadata.novel_id,
+        "title": metadata.title,
+        "author": metadata.author,
+        "tags": metadata.tags,
         "chapter": len(ep_list),
-        "status": status,
-        "description": description,
+        "status": metadata.status,
+        "description": metadata.description,
     }
 
     chapters_path = os.path.join(book_dir, "chapters.jsonl")

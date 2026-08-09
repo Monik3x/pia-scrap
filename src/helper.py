@@ -5,6 +5,7 @@ import re
 import logging
 import tempfile
 import unicodedata
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urljoin, urlparse
 from src.const import APPROVED_IMAGE_HOSTS, BASE_URL, CONFIG_PATH, IMG_BASE_HTTPS
@@ -18,6 +19,20 @@ WINDOWS_RESERVED_NAMES = {
 }
 DEFAULT_COMPONENT_LENGTH = 120
 BOOK_SLUG_LENGTH = 96
+
+
+@dataclass(frozen=True)
+class BookOutputPaths:
+    """All filesystem locations belonging to one novel export."""
+
+    base: str
+    book_dir: str
+    epub_path: str
+    metadata_path: str
+    chapters_path: str
+    novel_id_path: str
+    cache_dir: str
+    image_cache_dir: str
 
 # ----------------------------
 # Helpers
@@ -208,6 +223,39 @@ def book_base(out_dir: str, title: str, novel_id: int) -> str:
             return candidate
         if _book_directory_novel_id(book_dir) == novel_id:
             return candidate
+
+
+def book_output_paths(
+    out_dir: str, title: str, novel_id: Optional[int] = None
+) -> BookOutputPaths:
+    """Resolve and validate the complete output layout for a novel."""
+    out_dir = os.fspath(out_dir)
+    if not out_dir.strip():
+        raise ValueError("Output directory must not be empty.")
+
+    if novel_id is None:
+        base = kebab(title)
+    else:
+        try:
+            novel_id = int(novel_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Novel ID must be a positive integer.") from exc
+        if novel_id <= 0:
+            raise ValueError("Novel ID must be a positive integer.")
+        base = book_base(out_dir, title, novel_id)
+
+    book_dir = os.path.join(out_dir, base)
+    cache_dir = os.path.join(book_dir, ".raw_cache")
+    return BookOutputPaths(
+        base=base,
+        book_dir=book_dir,
+        epub_path=os.path.join(book_dir, f"{base}.epub"),
+        metadata_path=os.path.join(book_dir, "metadata.json"),
+        chapters_path=os.path.join(book_dir, "chapters.jsonl"),
+        novel_id_path=os.path.join(book_dir, ".novel_id"),
+        cache_dir=cache_dir,
+        image_cache_dir=os.path.join(cache_dir, "images"),
+    )
 
 def unique_in_order(values: List[int]) -> List[int]:
     seen = set()
