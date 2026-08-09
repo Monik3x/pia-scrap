@@ -7,6 +7,18 @@ from pathlib import Path
 BASE_URL = "https://global.novelpia.com"
 API_BASE = "https://api-global.novelpia.com"
 IMG_BASE_HTTPS = "https:"
+IMAGE_HOST_COOKIE_POLICY = {
+    "global.novelpia.com": "session",
+    "gn.novelpia.com": "signed",
+    "image.novelpia.com": "signed",
+    "pv-gn.novelpia.com": "signed",
+}
+APPROVED_IMAGE_HOSTS = frozenset(IMAGE_HOST_COOKIE_POLICY)
+SIGNED_IMAGE_COOKIE_NAMES = frozenset({
+    "CloudFront-Key-Pair-Id",
+    "CloudFront-Policy",
+    "CloudFront-Signature",
+})
 HTTP_LOG = False 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / ".api.json"
 

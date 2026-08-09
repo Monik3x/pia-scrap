@@ -5,16 +5,18 @@ import json
 import logging
 
 from typing import Dict, List, Optional, Tuple, Callable
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 from ebooklib import epub
 from tqdm import tqdm
 from src.api import NovelpiaClient
-from src.const import BASE_URL
+from src.const import BASE_URL, IMAGE_HOST_COOKIE_POLICY, SIGNED_IMAGE_COOKIE_NAMES
+from src.novel import html_from_episode_text
 from src.helper import (
     book_base,
     ensure_dir,
     image_type,
+    is_approved_image_url,
     kebab,
     normalize_url,
     write_json_atomic,
@@ -33,6 +35,11 @@ class EpubBuilder:
         ensure_dir(out_dir)
 
     def _fetch_bytes(self, client: NovelpiaClient, url: str, referer_url: str, episode_cookies: dict = None) -> Optional[bytes]:
+        url = normalize_url(url)
+        if not is_approved_image_url(url):
+            logger.warning(f"[warn] Blocked image URL outside approved Novelpia hosts: {url}")
+            return None
+
         last_error = "Unknown Error"
         for attempt in range(1, 4):
             cancel_event = getattr(client, "cancel_event", None)
@@ -48,16 +55,38 @@ class EpubBuilder:
                     "Sec-Fetch-Site": "cross-site",
                 }
                 
-                # Combine our base cookies with the specific chapter's CloudFront keys!
-                cookie_dict = {k: v for k, v in client.s.cookies.items()}
-                if episode_cookies:
-                    cookie_dict.update(episode_cookies)
-                    
-                cookie_str = "; ".join([f"{k}={v}" for k, v in cookie_dict.items()])
-                if cookie_str:
-                    headers["Cookie"] = cookie_str
-                    
-                resp = client.s.get(url, headers=headers, timeout=client.timeout)
+                host = urlparse(url).hostname.lower()
+                cookie_policy = IMAGE_HOST_COOKIE_POLICY[host]
+                cookie_dict = {}
+                if cookie_policy == "signed" and isinstance(episode_cookies, dict):
+                    cookie_dict = {
+                        key: value for key, value in episode_cookies.items()
+                        if key in SIGNED_IMAGE_COOKIE_NAMES and value
+                    }
+                elif cookie_policy == "session":
+                    for key in ("USERKEY", "TKEY"):
+                        try:
+                            value = client.s.cookies.get(key)
+                        except Exception:
+                            value = None
+                        if value:
+                            cookie_dict[key] = value
+
+                # An explicit header prevents the session's broad .novelpia.com
+                # cookie jar from adding authentication cookies to CDN requests.
+                headers["Cookie"] = "; ".join(f"{key}={value}" for key, value in cookie_dict.items())
+
+                resp = client.s.get(
+                    url, headers=headers, timeout=client.timeout, allow_redirects=False
+                )
+
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    redirect_url = urljoin(url, resp.headers.get("Location", ""))
+                    if not is_approved_image_url(redirect_url):
+                        last_error = f"Blocked redirect to unapproved host: {redirect_url}"
+                        break
+                    url = redirect_url
+                    continue
                 
                 if resp.status_code == 429:
                     last_error = "HTTP 429 (Too Many Requests)"
@@ -197,6 +226,7 @@ class EpubBuilder:
                     src, referer_url=viewer_url, episode_cookies=episode_cookies
                 )
                 if not img_bytes:
+                    img.decompose()
                     continue
 
                 ext, media_type = image_type(img_bytes, fallback_ext)
@@ -308,7 +338,7 @@ class EpubBuilder:
 
         # --- Processing Results ---
         for i, res in enumerate(all_results, 1):
-            html_text = res["html"]
+            html_text = html_from_episode_text(res["html"])
             epi_title = res["epi_title"]
             signed_key = res.get("signed_key", {})
             if not isinstance(signed_key, dict):

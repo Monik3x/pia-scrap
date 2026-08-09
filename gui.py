@@ -190,6 +190,7 @@ class PiaScrapGUI(ctk.CTk):
     def _create_right_panel(self):
         right_frame = ctk.CTkFrame(self.tab_download, corner_radius=10)
         right_frame.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
+        right_frame.grid_propagate(False)
         right_frame.grid_columnconfigure(0, weight=1)
         right_frame.grid_rowconfigure(5, weight=1)
         

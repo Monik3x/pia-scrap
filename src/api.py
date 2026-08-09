@@ -401,14 +401,37 @@ def _wait_for_retry(seconds: float, cancel_event, reason: str) -> None:
 
 
 def _response_requires_auth(response) -> bool:
-    if response.status_code in (401, 403):
+    if response.status_code == 401:
         return True
+
     try:
         body = response.json()
-        message = (body.get("errmsg") or body.get("message") or "").lower()
-        return "token" in message and "expire" in message
     except (AttributeError, TypeError, ValueError):
         return False
+
+    def iter_error_strings(value):
+        if isinstance(value, str):
+            yield value.casefold()
+        elif isinstance(value, dict):
+            for key, nested_value in value.items():
+                if str(key).casefold() in {
+                    "code", "error", "error_code", "errmsg", "message", "reason", "result"
+                }:
+                    yield from iter_error_strings(nested_value)
+        elif isinstance(value, list):
+            for item in value:
+                yield from iter_error_strings(item)
+
+    error_text = " ".join(iter_error_strings(body))
+    if not error_text:
+        return False
+
+    auth_subjects = ("auth", "login", "session", "token", "tkey", "userkey")
+    auth_failures = ("expire", "invalid", "missing", "required", "revoked", "not valid")
+    return (
+        any(subject in error_text for subject in auth_subjects)
+        and any(failure in error_text for failure in auth_failures)
+    )
 
 
 def request_with_retries(session: requests.Session, method: str, url: str, *,

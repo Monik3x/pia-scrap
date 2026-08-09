@@ -7,9 +7,17 @@ import tempfile
 import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urljoin, urlparse
-from src.const import BASE_URL, CONFIG_PATH, IMG_BASE_HTTPS
+from src.const import APPROVED_IMAGE_HOSTS, BASE_URL, CONFIG_PATH, IMG_BASE_HTTPS
 
 logger = logging.getLogger("pia_scrap")
+
+WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+DEFAULT_COMPONENT_LENGTH = 120
+BOOK_SLUG_LENGTH = 96
 
 # ----------------------------
 # Helpers
@@ -18,8 +26,28 @@ logger = logging.getLogger("pia_scrap")
 def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
+def sanitize_path_component(
+    name: str, fallback: str = "book", max_length: int = DEFAULT_COMPONENT_LENGTH
+) -> str:
+    """Return a bounded path component that is valid on Windows and POSIX."""
+    if max_length < 1:
+        raise ValueError("max_length must be positive")
+
+    value = unicodedata.normalize("NFKC", str(name or ""))
+    value = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "_", value).strip(" .")
+    if not value:
+        value = fallback
+    value = value[:max_length].rstrip(" .") or fallback[:max_length].rstrip(" .") or "_"
+
+    # Windows reserves these names even when an extension is present.
+    if value.split(".", 1)[0].upper() in WINDOWS_RESERVED_NAMES:
+        value = f"_{value}"
+        value = value[:max_length].rstrip(" .") or "_"
+    return value
+
+
 def sanitize_filename(name: str) -> str:
-    return re.sub(r'[\\/:*?"<>|]+', "_", (name or "").strip()) or "book"
+    return sanitize_path_component(name)
 
 def normalize_url(u: str) -> str:
     if not u:
@@ -30,6 +58,21 @@ def normalize_url(u: str) -> str:
     if not urlparse(u).scheme:
         return urljoin(f"{BASE_URL}/", u)
     return u
+
+def is_approved_image_url(url: str) -> bool:
+    """Accept only HTTPS image URLs on Novelpia's known first-party hosts."""
+    try:
+        parsed = urlparse(url)
+        return (
+            parsed.scheme.lower() == "https"
+            and parsed.hostname is not None
+            and parsed.hostname.lower() in APPROVED_IMAGE_HOSTS
+            and parsed.username is None
+            and parsed.password is None
+            and parsed.port in (None, 443)
+        )
+    except ValueError:
+        return False
 
 def media_type_from_ext(ext: str) -> str:
     ext = ext.lower()
@@ -80,23 +123,18 @@ def kebab(s: str, fallback: str = "book") -> str:
     """Create a readable, Unicode-safe directory name."""
     normalized = unicodedata.normalize("NFKC", s or "").casefold()
     slug = re.sub(r"[\W_]+", "-", normalized, flags=re.UNICODE).strip("-")
-    slug = slug or fallback
-    if slug.upper() in {
-        "CON", "PRN", "AUX", "NUL",
-        *(f"COM{i}" for i in range(1, 10)),
-        *(f"LPT{i}" for i in range(1, 10)),
-    }:
-        slug = f"_{slug}"
-    return slug
+    return sanitize_path_component(
+        slug, fallback=fallback, max_length=BOOK_SLUG_LENGTH
+    )
 
-def book_base(out_dir: str, title: str, novel_id: int) -> str:
-    """Choose a readable book directory without overwriting a different novel."""
-    novel_id = int(novel_id)
-    base = kebab(title, fallback=f"novel-{novel_id}")
-    book_dir = os.path.join(out_dir, base)
-    if not os.path.isdir(book_dir):
-        return base
+def _with_component_suffix(base: str, suffix: str, max_length: int = BOOK_SLUG_LENGTH) -> str:
+    suffix = sanitize_path_component(suffix, fallback="", max_length=max_length)
+    prefix_length = max(1, max_length - len(suffix))
+    prefix = base[:prefix_length].rstrip(" .-") or "book"
+    return sanitize_path_component(prefix + suffix, max_length=max_length)
 
+
+def _book_directory_novel_id(book_dir: str) -> Optional[int]:
     existing_id = None
     marker_path = os.path.join(book_dir, ".novel_id")
     try:
@@ -117,13 +155,59 @@ def book_base(out_dir: str, title: str, novel_id: int) -> str:
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             pass
 
-    if existing_id is not None:
+    try:
+        return int(existing_id) if existing_id is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _find_existing_book_base(out_dir: str, novel_id: int, preferred_base: str) -> Optional[str]:
+    """Locate an existing book by its stable ID, even after a remote rename."""
+    matches = []
+    try:
+        with os.scandir(out_dir) as iterator:
+            entries = sorted(iterator, key=lambda entry: entry.name.casefold())
+    except OSError:
+        return None
+
+    for entry in entries:
         try:
-            if int(existing_id) == novel_id:
-                return base
-        except (TypeError, ValueError):
-            pass
-    return f"{base}-{novel_id}"
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+        except OSError:
+            continue
+        if _book_directory_novel_id(entry.path) == novel_id:
+            if entry.name == preferred_base:
+                return entry.name
+            matches.append(entry.name)
+
+    if len(matches) > 1:
+        logger.warning(
+            f"Multiple local book directories claim novel ID {novel_id}; using '{matches[0]}'."
+        )
+    return matches[0] if matches else None
+
+def book_base(out_dir: str, title: str, novel_id: int) -> str:
+    """Choose a readable book directory without overwriting a different novel."""
+    novel_id = int(novel_id)
+    base = kebab(title, fallback=f"novel-{novel_id}")
+    existing_base = _find_existing_book_base(out_dir, novel_id, base)
+    if existing_base:
+        return existing_base
+
+    candidates = [base, _with_component_suffix(base, f"-{novel_id}")]
+    counter = 2
+    while True:
+        if candidates:
+            candidate = candidates.pop(0)
+        else:
+            candidate = _with_component_suffix(base, f"-{novel_id}-{counter}")
+            counter += 1
+        book_dir = os.path.join(out_dir, candidate)
+        if not os.path.isdir(book_dir):
+            return candidate
+        if _book_directory_novel_id(book_dir) == novel_id:
+            return candidate
 
 def unique_in_order(values: List[int]) -> List[int]:
     seen = set()
