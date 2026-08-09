@@ -25,6 +25,7 @@ BOOK_SLUG_LENGTH = 96
 class BookOutputPaths:
     """All filesystem locations belonging to one novel export."""
 
+    novel_id: Optional[int]
     base: str
     book_dir: str
     epub_path: str
@@ -202,11 +203,57 @@ def _find_existing_book_base(out_dir: str, novel_id: int, preferred_base: str) -
         )
     return matches[0] if matches else None
 
-def book_base(out_dir: str, title: str, novel_id: int) -> str:
+
+def build_book_directory_index(out_dir: str) -> Dict[int, str]:
+    """Scan an output root once and map each known novel ID to a directory name."""
+    index: Dict[int, str] = {}
+    try:
+        with os.scandir(out_dir) as iterator:
+            entries = sorted(iterator, key=lambda entry: entry.name.casefold())
+    except OSError:
+        return index
+
+    for entry in entries:
+        try:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+        except OSError:
+            continue
+        novel_id = _book_directory_novel_id(entry.path)
+        if novel_id is None:
+            continue
+        if novel_id in index:
+            logger.warning(
+                f"Multiple local book directories claim novel ID {novel_id}; "
+                f"using '{index[novel_id]}'."
+            )
+            continue
+        index[novel_id] = entry.name
+    return index
+
+
+def book_base(
+    out_dir: str,
+    title: str,
+    novel_id: int,
+    book_index: Optional[Dict[int, str]] = None,
+) -> str:
     """Choose a readable book directory without overwriting a different novel."""
     novel_id = int(novel_id)
     base = kebab(title, fallback=f"novel-{novel_id}")
-    existing_base = _find_existing_book_base(out_dir, novel_id, base)
+    preferred_dir = os.path.join(out_dir, base)
+
+    # The overwhelmingly common case should require one directory check, not a
+    # scan of the entire library.
+    if os.path.isdir(preferred_dir) and _book_directory_novel_id(preferred_dir) == novel_id:
+        return base
+
+    if book_index is None:
+        existing_base = _find_existing_book_base(out_dir, novel_id, base)
+    else:
+        existing_base = book_index.get(novel_id)
+        if existing_base and not os.path.isdir(os.path.join(out_dir, existing_base)):
+            existing_base = None
     if existing_base:
         return existing_base
 
@@ -226,7 +273,10 @@ def book_base(out_dir: str, title: str, novel_id: int) -> str:
 
 
 def book_output_paths(
-    out_dir: str, title: str, novel_id: Optional[int] = None
+    out_dir: str,
+    title: str,
+    novel_id: Optional[int] = None,
+    book_index: Optional[Dict[int, str]] = None,
 ) -> BookOutputPaths:
     """Resolve and validate the complete output layout for a novel."""
     out_dir = os.fspath(out_dir)
@@ -242,11 +292,12 @@ def book_output_paths(
             raise ValueError("Novel ID must be a positive integer.") from exc
         if novel_id <= 0:
             raise ValueError("Novel ID must be a positive integer.")
-        base = book_base(out_dir, title, novel_id)
+        base = book_base(out_dir, title, novel_id, book_index=book_index)
 
     book_dir = os.path.join(out_dir, base)
     cache_dir = os.path.join(book_dir, ".raw_cache")
     return BookOutputPaths(
+        novel_id=novel_id,
         base=base,
         book_dir=book_dir,
         epub_path=os.path.join(book_dir, f"{base}.epub"),
@@ -304,11 +355,13 @@ def load_config() -> Dict[str, Any]:
         return {}
     return {}
 
-def save_config(cfg: Dict[str, Any]) -> None:
+def save_config(cfg: Dict[str, Any]) -> bool:
     try:
         write_json_atomic(CONFIG_PATH, cfg, indent=2)
+        return True
     except Exception as e:
         logger.error(f"Error occurred while saving config: {e}")
+        return False
 
 # ----------------------------
 # Auth token management & header merging

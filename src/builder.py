@@ -2,7 +2,7 @@ import json
 import os
 import logging
 import zipfile
-from typing import Optional, Callable
+from typing import Callable, Dict, Optional
 
 from bs4 import BeautifulSoup
 from tqdm import tqdm
@@ -30,11 +30,12 @@ def _epub_chapter_count(epub_path: str) -> int:
 
 def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", update_mode=False, threads=1,
                progress_cb: Optional[Callable[[int, int, str], None]] = None,
-               status_cb: Optional[Callable[[str], None]] = None):
+               status_cb: Optional[Callable[[str], None]] = None,
+               book_index: Optional[Dict[int, str]] = None):
     if status_cb:
         status_cb("Fetching novel metadata and episode list...")
     data_novel, ep_list, title = fetch_novel_and_episodes(client, novel_id, max_chapters=max_chapters)
-    paths = book_output_paths(out_dir, title, novel_id)
+    paths = book_output_paths(out_dir, title, novel_id, book_index=book_index)
     book_dir = paths.book_dir
 
     if update_mode:
@@ -79,7 +80,8 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
         language=language,
         novel_id=novel_id,
         update_mode=update_mode,
-        progress_cb=progress_cb
+        progress_cb=progress_cb,
+        output_paths=paths,
     )
 
     if status_cb:
@@ -91,12 +93,13 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
 
 def build_txt(client, novel_id, out_dir, max_chapters=None, threads=1,
               progress_cb: Optional[Callable[[int, int, str], None]] = None,
-              status_cb: Optional[Callable[[str], None]] = None):
+              status_cb: Optional[Callable[[str], None]] = None,
+              book_index: Optional[Dict[int, str]] = None):
     if status_cb:
         status_cb("Fetching novel metadata and episode list...")
     data_novel, ep_list, title = fetch_novel_and_episodes(client, novel_id, max_chapters)
 
-    paths = book_output_paths(out_dir, title, novel_id)
+    paths = book_output_paths(out_dir, title, novel_id, book_index=book_index)
     book_dir = paths.book_dir
 
     total = len(ep_list)

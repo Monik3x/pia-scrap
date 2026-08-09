@@ -12,6 +12,7 @@ from tqdm import tqdm
 from src.api import NovelpiaClient
 from src.const import BASE_URL, IMAGE_HOST_COOKIE_POLICY, SIGNED_IMAGE_COOKIE_NAMES
 from src.helper import (
+    BookOutputPaths,
     book_output_paths,
     ensure_dir,
     image_type,
@@ -108,7 +109,8 @@ class EpubBuilder:
               filename_hint: Optional[str] = None, language: str = "en",
               author_fallback: str = "Unknown", css_text: Optional[str] = None,
               novel_id: Optional[int] = None, update_mode: bool = False, threads: int = 1,
-              progress_cb: Optional[Callable[[int, int, str], None]] = None) -> Tuple[str, str, int]:
+              progress_cb: Optional[Callable[[int, int, str], None]] = None,
+              output_paths: Optional[BookOutputPaths] = None) -> Tuple[str, str, int]:
         metadata = parse_novel_metadata(novel, novel_id, author_fallback)
         novel_fields = metadata.novel
         title = metadata.title
@@ -116,7 +118,16 @@ class EpubBuilder:
         status = metadata.status
         description = metadata.description
         resolved_novel_id = metadata.novel_id
-        paths = book_output_paths(self.out_dir, filename_hint or title, resolved_novel_id)
+        if output_paths is not None:
+            if output_paths.novel_id != resolved_novel_id:
+                raise ValueError("Resolved output paths do not match the novel ID.")
+            expected_root = os.path.normcase(os.path.abspath(self.out_dir))
+            actual_root = os.path.normcase(os.path.dirname(os.path.abspath(output_paths.book_dir)))
+            if actual_root != expected_root:
+                raise ValueError("Resolved output paths do not belong to this output directory.")
+            paths = output_paths
+        else:
+            paths = book_output_paths(self.out_dir, filename_hint or title, resolved_novel_id)
         book_dir = paths.book_dir
         ensure_dir(book_dir)
         if resolved_novel_id is not None:

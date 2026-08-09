@@ -4,7 +4,7 @@ import threading
 from typing import List, Optional, Callable, Dict, Any
 from src.api import NovelpiaClient
 from src.builder import build_epub, build_txt
-from src.helper import load_config, save_config, parse_range
+from src.helper import build_book_directory_index, load_config, save_config, parse_range
 
 logger = logging.getLogger("pia_scrap")
 
@@ -94,12 +94,15 @@ class ScraperEngine:
             except Exception as e:
                 logger.debug(f"Error reading cookies after login: {e}")
 
-            save_config({
+            tokens_stored = save_config({
                 "login_at": self.client.tokens.login_at,
                 "userkey": userkey_val or cfg_userkey or "",
                 "tkey": tkey_val or self.client.tokens.tkey or cfg_tkey or "",
             })
-            self.update_status("Login successful. Stored tokens updated.")
+            if tokens_stored:
+                self.update_status("Login successful. Stored tokens updated.")
+            else:
+                self.update_status("Login successful, but tokens could not be stored.")
             return True
         elif cfg_login_at and cfg_userkey:
             self.update_status("Reusing stored authentication tokens...")
@@ -136,6 +139,7 @@ class ScraperEngine:
 
         total_novels = len(target_ids)
         self.update_status(f"Starting download queue of {total_novels} novels...")
+        book_index = build_book_directory_index(self.out_dir)
 
         for idx, novel_id in enumerate(target_ids):
             # Check for cancellation before processing the next novel
@@ -157,7 +161,8 @@ class ScraperEngine:
                         max_chapters=(self.max_chapters if self.max_chapters > 0 else None),
                         threads=self.threads,
                         progress_cb=self.update_progress,
-                        status_cb=self.update_status
+                        status_cb=self.update_status,
+                        book_index=book_index,
                     )
                     success_msg = f"Wrote TXT files under: {out_dir_final} | Title: {title} | Chapters: {count}"
                     self.update_status(f"[success] {success_msg}")
@@ -173,7 +178,8 @@ class ScraperEngine:
                         update_mode=self.update_mode,
                         threads=self.threads,
                         progress_cb=self.update_progress,
-                        status_cb=self.update_status
+                        status_cb=self.update_status,
+                        book_index=book_index,
                     )
 
                     if out_file is None:

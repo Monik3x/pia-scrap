@@ -102,7 +102,10 @@ class NovelpiaClient:
             self.tokens.login_at = r.json()["result"]["LOGINAT"]
             cfg = load_config()
             cfg["login_at"] = self.tokens.login_at
-            save_config(cfg)
+            if not save_config(cfg):
+                logger.warning(
+                    "Authentication token refreshed in memory, but could not be stored."
+                )
             return self.tokens.login_at
 
     def _on_rate_limit(self):
