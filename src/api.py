@@ -207,6 +207,51 @@ class NovelpiaClient:
             
         return unique_in_order(novel_ids)
 
+    def recent_novels(self, rows: int = 30) -> List[int]:
+        """Fetch recent public K-Premium novel IDs, newest first."""
+        if rows < 1:
+            raise ValueError("rows must be at least 1")
+
+        url = f"{const.API_BASE}/v1/novel/list"
+        r = request_with_retries(
+            self.s, "GET", url,
+            params={"rows": rows},
+            headers=merge_login_at({}, self.tokens.login_at),
+            timeout=self.timeout, allow_refresh=True,
+            refresh_fn=self.refresh, login_fn=self.login,
+            on_rate_limit=self._on_rate_limit,
+            cancel_event=self.cancel_event,
+        )
+        r.raise_for_status()
+        data = r.json()
+
+        if not isinstance(data, dict):
+            return []
+        result = data.get("result") or {}
+        items = result.get("list", []) if isinstance(result, dict) else []
+        if not isinstance(items, list):
+            return []
+
+        novel_ids = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            novel = item.get("novel") or {}
+            if not isinstance(novel, dict):
+                continue
+            # The global API identifies Korean K-Premium titles by locale.
+            if str(novel.get("novel_locale") or "").casefold() != "ko":
+                continue
+            novel_no = novel.get("novel_no")
+            try:
+                novel_id = int(novel_no)
+            except (TypeError, ValueError):
+                continue
+            if novel_id > 0:
+                novel_ids.append(novel_id)
+
+        return unique_in_order(novel_ids)
+
     def episode_ticket(self, episode_no: int) -> Dict:
         url = f"{const.API_BASE}/v1/novel/episode"
         headers = merge_login_at({}, self.tokens.login_at)

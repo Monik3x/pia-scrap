@@ -42,7 +42,7 @@ python main.py NOVEL_ID [--user EMAIL] [--pass PASSWORD]
 
 | Argument | Description |
 |---|---|
-| `NOVEL_ID` | Mixed numeric or range `novel_no`, e.g. `49`, `40,47-50` or `mybook`, `library` to access user favorites |
+| `NOVEL_ID` | Mixed numeric/range `novel_no` (for example `49` or `40,47-50`), `mybook`/`library` for user favorites, or `recent`/`latest` for K-Premium novels among the 30 latest public listings |
 | `--user`, `--pass` | Login credentials; tokens saved to `.api.json` for reuse |
 | `--out` | Output directory (default: `output`) |
 | `--max-chapters` | Fetch up to N episodes (`0` or unset = all) |
@@ -80,6 +80,12 @@ python main.py 95,100-110 --update
 
 ```bash
 python main.py library --update
+```
+
+**5. Download recent K-Premium releases** — inspect the 30 latest public listings and download only K-Premium titles:
+
+```bash
+python main.py recent --update
 ```
 
 ---

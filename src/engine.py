@@ -124,6 +124,9 @@ class ScraperEngine:
         if novel_ids_input.lower() in ("mybook", "library"):
             self.update_status("Fetching target novel IDs from library...")
             return self.client.my_library()
+        elif novel_ids_input.lower() in ("recent", "latest"):
+            self.update_status("Fetching the 30 most recent public K-Premium listings...")
+            return self.client.recent_novels(rows=30)
         else:
             return parse_range(novel_ids_input)
 

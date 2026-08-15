@@ -127,7 +127,7 @@ class PiaScrapGUI(ctk.CTk):
         opts_title = ctk.CTkLabel(opts_frame, text="Download Target & Output", font=ctk.CTkFont(weight="bold"))
         opts_title.grid(row=0, column=0, columnspan=2, padx=10, pady=(5, 2), sticky="w")
         
-        self.ids_entry = ctk.CTkEntry(opts_frame, placeholder_text="Novel IDs (e.g. 1072, 1100-1110, or 'library')")
+        self.ids_entry = ctk.CTkEntry(opts_frame, placeholder_text="Novel IDs, 'library', or 'recent'")
         self.ids_entry.grid(row=1, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
         
         self.output_entry = ctk.CTkEntry(opts_frame, placeholder_text="Output Directory")
@@ -544,7 +544,7 @@ class PiaScrapGUI(ctk.CTk):
 
         ids_raw = self.ids_entry.get().strip()
         if not ids_raw:
-            messagebox.showerror("Validation Error", "Please input a valid Novel ID, range (e.g., 100-110), or 'library'.")
+            messagebox.showerror("Validation Error", "Please input a valid Novel ID, range (e.g., 100-110), 'library', or 'recent'.")
             return
             
         email = self.email_entry.get().strip() or None
@@ -633,7 +633,7 @@ class PiaScrapGUI(ctk.CTk):
                 self.gui_queue.put(("done", {"success": 0, "skipped": 0, "failed": 0, "results": []}))
                 return
             if not target_ids:
-                self.gui_queue.put(("error", f"No valid novels found for: {ids_raw}. Ensure library works or confirm IDs are valid."))
+                self.gui_queue.put(("error", f"No valid novels found for: {ids_raw}. Check the selected list or confirm IDs are valid."))
                 return
                 
             summary = engine.run_download_queue(target_ids)

@@ -91,7 +91,12 @@ def parse_novel_metadata(
 
     raw_description = nv.get("novel_story")
     description = raw_description.strip() if isinstance(raw_description, str) else ""
-    status = "Completed" if str(nv.get("flag_complete", 0)) == "1" else "Ongoing"
+    if str(nv.get("flag_complete", 0)) == "1":
+        status = "Completed"
+    elif str(nv.get("flag_live", 0)) == "2":
+        status = "Discontinued"
+    else:
+        status = "Ongoing"
 
     tag_items = result.get("tag_list") or nv.get("tag_list") or []
     if not isinstance(tag_items, list):

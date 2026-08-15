@@ -12,7 +12,7 @@ from src import const
 def main():
     load_dotenv()
     ap = argparse.ArgumentParser(description="Novelpia to EPUB packer (API)")
-    ap.add_argument("novel_ids", help="Novel ID (e.g. 1072) or Range (e.g. 1000-1050) or mixed strings (47,49,51-55)")
+    ap.add_argument("novel_ids", help=("Novel ID (e.g. 1072) or Range (e.g. 1000-1050) or mixed strings (47,49,51-55), 'library' for favorites, or 'recent' for K-Premium novels among the 30 latest listings"),)
     ap.add_argument("--user", "--email", "-u", "-e", dest="email", help="Novelpia email (overrides config tokens if provided)")
     ap.add_argument("--pass", "--password", "-p", dest="password", help="Novelpia password (overrides config tokens if provided)")
     ap.add_argument("--out", default="output", help="Output directory")
@@ -69,14 +69,14 @@ def main():
         print(f"[error] Failed client initialization: {e}")
         sys.exit(2)
 
-    # Resolve IDs from input queue or library
+    # Resolve IDs from input queue, library, or recent public listings
     try:
         target_ids = engine.resolve_novel_ids(args.novel_ids)
         if not target_ids:
             print("[warn] Queue is empty or failed to parse. Exiting.")
             sys.exit(0)
     except Exception as e:
-        print(f"[error] Failed to parse range or retrieve library list: {e}")
+        print(f"[error] Failed to parse or retrieve the requested novel list: {e}")
         sys.exit(1)
 
     print(f"[info] Queue size: {len(target_ids)} novels")
