@@ -26,6 +26,10 @@ logger = logging.getLogger("pia_scrap")
 # API Client
 # ----------------------------
 
+class NovelUnavailableError(ValueError):
+    """The requested novel ID is not assigned or is unavailable."""
+
+
 @dataclass
 class Tokens:
     login_at: Optional[str] = None
@@ -139,6 +143,10 @@ class NovelpiaClient:
             max_retries=1,  # Most likely error here is 500 from accessing an empty/invalid novel_id, limit time lost backing off
             cancel_event=self.cancel_event
         )
+        if r.status_code == 500:
+            raise NovelUnavailableError(
+                f"Novel {novel_id} is unassigned or unavailable."
+            )
         r.raise_for_status()
         return r.json()
 

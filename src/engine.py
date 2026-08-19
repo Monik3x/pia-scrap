@@ -2,7 +2,7 @@ import logging
 import os
 import threading
 from typing import List, Optional, Callable, Dict, Any
-from src.api import NovelpiaClient
+from src.api import NovelUnavailableError, NovelpiaClient
 from src.builder import build_epub, build_txt
 from src.helper import build_book_directory_index, load_config, save_config, parse_range
 
@@ -204,7 +204,11 @@ class ScraperEngine:
                 err_str = str(e)
                 response = getattr(e, "response", None)
                 status_code = getattr(response, "status_code", None)
-                if isinstance(e, ValueError) and "returned no metadata" in err_str:
+                if isinstance(e, NovelUnavailableError):
+                    warn_msg = f"{e} Skipping."
+                    self.update_status(f"[warn] {warn_msg}")
+                    results_summary.append({"novel_id": novel_id, "status": "not_exist"})
+                elif isinstance(e, ValueError) and "returned no metadata" in err_str:
                     warn_msg = f"Novel {novel_id} does not exist or has no metadata. Skipping."
                     self.update_status(f"[warn] {warn_msg}")
                     results_summary.append({"novel_id": novel_id, "status": "not_exist"})
