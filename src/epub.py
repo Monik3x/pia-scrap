@@ -109,6 +109,7 @@ class EpubBuilder:
               filename_hint: Optional[str] = None, language: str = "en",
               author_fallback: str = "Unknown", css_text: Optional[str] = None,
               novel_id: Optional[int] = None, update_mode: bool = False, threads: int = 1,
+              reuse_episode_cache: bool = True,
               progress_cb: Optional[Callable[[int, int, str], None]] = None,
               output_paths: Optional[BookOutputPaths] = None) -> Tuple[str, str, int]:
         metadata = parse_novel_metadata(novel, novel_id, author_fallback)
@@ -259,7 +260,7 @@ class EpubBuilder:
             cache_file = os.path.join(cache_dir, f"{epi_no}.json") if update_mode else None
             
             cached_data = None
-            if update_mode and cache_file and os.path.exists(cache_file):
+            if update_mode and reuse_episode_cache and cache_file and os.path.exists(cache_file):
                 try:
                     with open(cache_file, "r", encoding="utf-8") as f:
                         cached_data = json.load(f)

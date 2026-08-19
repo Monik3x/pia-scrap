@@ -12,6 +12,8 @@ from src.novel import fetch_novel_and_episodes, parse_novel_metadata
 
 logger = logging.getLogger("pia_scrap")
 
+CACHE_GENERATION_MARKERS = ("flag_detail_trans", "update_dt")
+
 # ----------------------------
 # Main Build Function
 # ----------------------------
@@ -28,6 +30,11 @@ def _epub_chapter_count(epub_path: str) -> int:
     except (OSError, zipfile.BadZipFile):
         return -1
 
+
+def _cache_generation_markers(data_novel) -> Dict[str, object]:
+    novel = parse_novel_metadata(data_novel).novel
+    return {name: novel.get(name) for name in CACHE_GENERATION_MARKERS}
+
 def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", update_mode=False, threads=1,
                progress_cb: Optional[Callable[[int, int, str], None]] = None,
                status_cb: Optional[Callable[[str], None]] = None,
@@ -37,20 +44,43 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
     data_novel, ep_list, title = fetch_novel_and_episodes(client, novel_id, max_chapters=max_chapters)
     paths = book_output_paths(out_dir, title, novel_id, book_index=book_index)
     book_dir = paths.book_dir
+    reuse_episode_cache = True
 
     if update_mode:
         meta_path = paths.metadata_path
         epub_path = paths.epub_path
-        
-        if os.path.exists(meta_path) and os.path.exists(epub_path):
+
+        current_markers = _cache_generation_markers(data_novel)
+        reuse_episode_cache = False
+        if os.path.exists(meta_path):
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
+                if not isinstance(meta, dict):
+                    raise ValueError("metadata root must be an object")
                 existing_chapters = int(meta.get("chapter", 0))
                 target_chapters = len(ep_list)
-                packaged_chapters = _epub_chapter_count(epub_path)
+                markers_present = all(name in meta for name in CACHE_GENERATION_MARKERS)
+                flag_detail_changed = (
+                    meta.get("flag_detail_trans") != current_markers["flag_detail_trans"]
+                )
+                update_dt_changed = meta.get("update_dt") != current_markers["update_dt"]
+                markers_match = (
+                    markers_present
+                    and not flag_detail_changed
+                    and not update_dt_changed
+                )
+                force_full_refresh = (
+                    not markers_present
+                    or flag_detail_changed
+                    or (update_dt_changed and existing_chapters == target_chapters)
+                )
+                reuse_episode_cache = not force_full_refresh
+                packaged_chapters = _epub_chapter_count(epub_path) if os.path.exists(epub_path) else -1
                 if (
-                    existing_chapters >= target_chapters
+                    markers_match
+                    and os.path.exists(epub_path)
+                    and existing_chapters >= target_chapters
                     and packaged_chapters >= target_chapters
                     and existing_chapters == packaged_chapters
                     and target_chapters > 0
@@ -60,6 +90,10 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
                     if status_cb:
                         status_cb(msg)
                     return None, title, existing_chapters
+                if force_full_refresh:
+                    logger.info(
+                        f"Rebuilding '{title}'. Cached translation markers changed or are missing."
+                    )
                 if packaged_chapters != existing_chapters:
                     logger.warning(
                         f"[warn] Rebuilding '{title}': metadata lists {existing_chapters} "
@@ -80,6 +114,7 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
         language=language,
         novel_id=novel_id,
         update_mode=update_mode,
+        reuse_episode_cache=reuse_episode_cache,
         progress_cb=progress_cb,
         output_paths=paths,
     )
@@ -170,6 +205,7 @@ def build_metadata(book_dir, data_novel, novel_id, ep_list):
         "chapter": len(ep_list),
         "status": metadata.status,
         "description": metadata.description,
+        **{name: metadata.novel.get(name) for name in CACHE_GENERATION_MARKERS},
     }
 
     chapters_path = os.path.join(book_dir, "chapters.jsonl")
