@@ -21,6 +21,7 @@ SIGNED_IMAGE_COOKIE_NAMES = frozenset({
 })
 HTTP_LOG = False 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / ".api.json"
+EPISODE_REVISION_FIELD = "flag_detail_trans"
 
 SESSION_HEADERS = {
     "accept": "application/json, text/plain, */*",

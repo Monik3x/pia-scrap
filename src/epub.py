@@ -10,7 +10,12 @@ from bs4 import BeautifulSoup
 from ebooklib import epub
 from tqdm import tqdm
 from src.api import NovelpiaClient
-from src.const import BASE_URL, IMAGE_HOST_COOKIE_POLICY, SIGNED_IMAGE_COOKIE_NAMES
+from src.const import (
+    BASE_URL,
+    EPISODE_REVISION_FIELD,
+    IMAGE_HOST_COOKIE_POLICY,
+    SIGNED_IMAGE_COOKIE_NAMES,
+)
 from src.helper import (
     BookOutputPaths,
     book_output_paths,
@@ -109,7 +114,6 @@ class EpubBuilder:
               filename_hint: Optional[str] = None, language: str = "en",
               author_fallback: str = "Unknown", css_text: Optional[str] = None,
               novel_id: Optional[int] = None, update_mode: bool = False, threads: int = 1,
-              reuse_episode_cache: bool = True,
               progress_cb: Optional[Callable[[int, int, str], None]] = None,
               output_paths: Optional[BookOutputPaths] = None) -> Tuple[str, str, int]:
         metadata = parse_novel_metadata(novel, novel_id, author_fallback)
@@ -260,7 +264,7 @@ class EpubBuilder:
             cache_file = os.path.join(cache_dir, f"{epi_no}.json") if update_mode else None
             
             cached_data = None
-            if update_mode and reuse_episode_cache and cache_file and os.path.exists(cache_file):
+            if update_mode and cache_file and os.path.exists(cache_file):
                 try:
                     with open(cache_file, "r", encoding="utf-8") as f:
                         cached_data = json.load(f)
@@ -272,6 +276,10 @@ class EpubBuilder:
                     isinstance(cached_data, dict)
                     and isinstance(cached_data.get("html"), str)
                     and int(cached_data.get("epi_no")) == epi_no
+                    and EPISODE_REVISION_FIELD in cached_data
+                    and EPISODE_REVISION_FIELD in ep
+                    and ep[EPISODE_REVISION_FIELD] is not None
+                    and cached_data[EPISODE_REVISION_FIELD] == ep[EPISODE_REVISION_FIELD]
                 )
             except (TypeError, ValueError):
                 cache_is_valid = False
@@ -292,13 +300,19 @@ class EpubBuilder:
                 progress_cb(cached_count, len(episodes), "Loaded from cache")
 
         # Callback to write cache instantly when a thread returns
+        episode_revisions = {
+            int(ep["episode_no"]): ep.get(EPISODE_REVISION_FIELD) for ep in episodes
+        }
+
         def cache_result(res):
             if update_mode and res and "error" not in res:
                 epi_no = res.get("epi_no")
                 if epi_no:
                     c_file = os.path.join(cache_dir, f"{epi_no}.json")
                     try:
-                        write_json_atomic(c_file, res)
+                        cache_record = dict(res)
+                        cache_record[EPISODE_REVISION_FIELD] = episode_revisions[int(epi_no)]
+                        write_json_atomic(c_file, cache_record)
                     except (OSError, TypeError, ValueError) as exc:
                         logger.warning(f"[warn] Could not cache episode {epi_no}: {exc}")
 

@@ -2,17 +2,16 @@ import json
 import os
 import logging
 import zipfile
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 from bs4 import BeautifulSoup
 from tqdm import tqdm
+from src.const import EPISODE_REVISION_FIELD
 from src.epub import EpubBuilder
 from src.helper import book_output_paths, ensure_dir, sanitize_filename, write_json_atomic, write_text_atomic
 from src.novel import fetch_novel_and_episodes, parse_novel_metadata
 
 logger = logging.getLogger("pia_scrap")
-
-CACHE_GENERATION_MARKERS = ("flag_detail_trans",)
 
 # ----------------------------
 # Main Build Function
@@ -31,9 +30,39 @@ def _epub_chapter_count(epub_path: str) -> int:
         return -1
 
 
-def _cache_generation_markers(data_novel) -> Dict[str, object]:
-    novel = parse_novel_metadata(data_novel).novel
-    return {name: novel.get(name) for name in CACHE_GENERATION_MARKERS}
+def _chapter_revisions_match(chapters_path: str, episodes: List[Dict]) -> bool:
+    """Return whether stored chapter revisions match the current episode list."""
+    try:
+        with open(chapters_path, "r", encoding="utf-8") as chapter_file:
+            stored_chapters = [
+                json.loads(line) for line in chapter_file if line.strip()
+            ]
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning(f"[warn] Ignoring invalid chapter metadata {chapters_path}: {exc}")
+        return False
+
+    if len(stored_chapters) < len(episodes):
+        return False
+
+    for stored, episode in zip(stored_chapters, episodes):
+        if (
+            not isinstance(stored, dict)
+            or EPISODE_REVISION_FIELD not in stored
+            or EPISODE_REVISION_FIELD not in episode
+            or episode[EPISODE_REVISION_FIELD] is None
+        ):
+            return False
+        try:
+            stored_episode_no = int(stored.get("episode_no"))
+            current_episode_no = int(episode.get("episode_no"))
+        except (TypeError, ValueError):
+            return False
+        if stored_episode_no != current_episode_no:
+            return False
+        if stored[EPISODE_REVISION_FIELD] != episode[EPISODE_REVISION_FIELD]:
+            return False
+
+    return True
 
 def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", update_mode=False, threads=1,
                progress_cb: Optional[Callable[[int, int, str], None]] = None,
@@ -44,14 +73,11 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
     data_novel, ep_list, title = fetch_novel_and_episodes(client, novel_id, max_chapters=max_chapters)
     paths = book_output_paths(out_dir, title, novel_id, book_index=book_index)
     book_dir = paths.book_dir
-    reuse_episode_cache = True
 
     if update_mode:
         meta_path = paths.metadata_path
         epub_path = paths.epub_path
 
-        current_markers = _cache_generation_markers(data_novel)
-        reuse_episode_cache = False
         if os.path.exists(meta_path):
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
@@ -60,14 +86,10 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
                     raise ValueError("metadata root must be an object")
                 existing_chapters = int(meta.get("chapter", 0))
                 target_chapters = len(ep_list)
-                marker_matches = (
-                    "flag_detail_trans" in meta
-                    and meta["flag_detail_trans"] == current_markers["flag_detail_trans"]
-                )
-                reuse_episode_cache = marker_matches
+                revisions_match = _chapter_revisions_match(paths.chapters_path, ep_list)
                 packaged_chapters = _epub_chapter_count(epub_path) if os.path.exists(epub_path) else -1
                 if (
-                    marker_matches
+                    revisions_match
                     and os.path.exists(epub_path)
                     and existing_chapters >= target_chapters
                     and packaged_chapters >= target_chapters
@@ -79,9 +101,9 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
                     if status_cb:
                         status_cb(msg)
                     return None, title, existing_chapters
-                if not marker_matches:
+                if not revisions_match:
                     logger.info(
-                        f"Rebuilding '{title}'. The cached translation marker changed or is missing."
+                        f"Rebuilding '{title}'. One or more chapter revisions changed or are missing."
                     )
                 if packaged_chapters != existing_chapters:
                     logger.warning(
@@ -103,7 +125,6 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
         language=language,
         novel_id=novel_id,
         update_mode=update_mode,
-        reuse_episode_cache=reuse_episode_cache,
         progress_cb=progress_cb,
         output_paths=paths,
     )
@@ -194,7 +215,6 @@ def build_metadata(book_dir, data_novel, novel_id, ep_list):
         "chapter": len(ep_list),
         "status": metadata.status,
         "description": metadata.description,
-        **{name: metadata.novel.get(name) for name in CACHE_GENERATION_MARKERS},
     }
 
     chapters_path = os.path.join(book_dir, "chapters.jsonl")
@@ -202,7 +222,13 @@ def build_metadata(book_dir, data_novel, novel_id, ep_list):
     for idx, ep in enumerate(ep_list, 1):
         epi_no = int(ep.get("episode_no"))
         epi_title = ep.get("epi_title") or f"Episode {ep.get('epi_num')}"
-        rec = {"idx": idx, "title": epi_title, "url": f"https://global.novelpia.com/viewer/{epi_no}"}
+        rec = {
+            "idx": idx,
+            "episode_no": epi_no,
+            "title": epi_title,
+            "url": f"https://global.novelpia.com/viewer/{epi_no}",
+            EPISODE_REVISION_FIELD: ep.get(EPISODE_REVISION_FIELD),
+        }
         chapter_lines.append(json.dumps(rec, ensure_ascii=False))
     write_text_atomic(chapters_path, "\n".join(chapter_lines) + ("\n" if chapter_lines else ""))
 

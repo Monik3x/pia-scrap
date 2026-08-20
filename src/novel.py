@@ -46,6 +46,16 @@ class NovelMetadata:
     tags: List[str]
 
 
+def _is_webtoon_episode(episode: Any) -> bool:
+    """Return whether an episode-list entry is a webtoon without prose content."""
+    if not isinstance(episode, dict):
+        return False
+    return (
+        str(episode.get("flag_content")) == "1"
+        and str(episode.get("flag_type")) == "0"
+    )
+
+
 def parse_novel_metadata(
     data: Dict[str, Any],
     novel_id: Optional[int] = None,
@@ -189,6 +199,14 @@ def fetch_novel_and_episodes(client, novel_id, max_chapters=None):
     ep_list = list_result.get("list", [])
     if not isinstance(ep_list, list):
         raise ValueError(f"Novel {novel_id} returned an invalid episode list.")
+
+    webtoon_count = sum(1 for episode in ep_list if _is_webtoon_episode(episode))
+    if webtoon_count:
+        logger.info(
+            f"skipping {webtoon_count} webtoon episode"
+            f"{'s' if webtoon_count != 1 else ''} without prose content"
+        )
+        ep_list = [episode for episode in ep_list if not _is_webtoon_episode(episode)]
 
     if max_chapters:
         ep_list = ep_list[:int(max_chapters)]

@@ -98,6 +98,7 @@ Files are written to `output/<title>/`:
 output/<title>/<title>.epub
 output/<title>/<episode-title>.txt   # if --txt is used
 output/<title>/.raw_cache/           # episode and image cache if --update is used
+output/<title>/chapters.jsonl        # chapter URLs and per-episode revision markers
 ```
 ---
 
