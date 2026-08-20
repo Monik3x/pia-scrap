@@ -12,7 +12,7 @@ from src.novel import fetch_novel_and_episodes, parse_novel_metadata
 
 logger = logging.getLogger("pia_scrap")
 
-CACHE_GENERATION_MARKERS = ("flag_detail_trans", "update_dt")
+CACHE_GENERATION_MARKERS = ("flag_detail_trans",)
 
 # ----------------------------
 # Main Build Function
@@ -60,25 +60,14 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
                     raise ValueError("metadata root must be an object")
                 existing_chapters = int(meta.get("chapter", 0))
                 target_chapters = len(ep_list)
-                markers_present = all(name in meta for name in CACHE_GENERATION_MARKERS)
-                flag_detail_changed = (
-                    meta.get("flag_detail_trans") != current_markers["flag_detail_trans"]
+                marker_matches = (
+                    "flag_detail_trans" in meta
+                    and meta["flag_detail_trans"] == current_markers["flag_detail_trans"]
                 )
-                update_dt_changed = meta.get("update_dt") != current_markers["update_dt"]
-                markers_match = (
-                    markers_present
-                    and not flag_detail_changed
-                    and not update_dt_changed
-                )
-                force_full_refresh = (
-                    not markers_present
-                    or flag_detail_changed
-                    or (update_dt_changed and existing_chapters == target_chapters)
-                )
-                reuse_episode_cache = not force_full_refresh
+                reuse_episode_cache = marker_matches
                 packaged_chapters = _epub_chapter_count(epub_path) if os.path.exists(epub_path) else -1
                 if (
-                    markers_match
+                    marker_matches
                     and os.path.exists(epub_path)
                     and existing_chapters >= target_chapters
                     and packaged_chapters >= target_chapters
@@ -90,9 +79,9 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
                     if status_cb:
                         status_cb(msg)
                     return None, title, existing_chapters
-                if force_full_refresh:
+                if not marker_matches:
                     logger.info(
-                        f"Rebuilding '{title}'. Cached translation markers changed or are missing."
+                        f"Rebuilding '{title}'. The cached translation marker changed or is missing."
                     )
                 if packaged_chapters != existing_chapters:
                     logger.warning(
