@@ -143,7 +143,7 @@ class NovelpiaClient:
             max_retries=1,  # Most likely error here is 500 from accessing an empty/invalid novel_id, limit time lost backing off
             cancel_event=self.cancel_event
         )
-        if r.status_code == 500:
+        if _response_indicates_missing_novel(r):
             raise NovelUnavailableError(
                 f"Novel {novel_id} is unassigned or unavailable."
             )
@@ -490,6 +490,42 @@ def _response_requires_auth(response) -> bool:
     )
 
 
+def _response_indicates_missing_novel(response) -> bool:
+    """Return whether a server error is Novelpia's missing-novel response."""
+    if response.status_code != 500:
+        return False
+
+    try:
+        body = response.json()
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if not isinstance(body, dict):
+        return False
+
+    result = body.get("result")
+    if not isinstance(result, dict):
+        result = {}
+
+    messages = []
+    for value in (body.get("errmsg"), result.get("message")):
+        if isinstance(value, str):
+            messages.append(value)
+    errmsgs = body.get("errmsgs")
+    if isinstance(errmsgs, list):
+        messages.extend(value for value in errmsgs if isinstance(value, str))
+
+    has_missing_message = any(
+        message.strip().casefold().rstrip(".") == "the novel does not exist"
+        for message in messages
+    )
+    has_novel_error_marker = (
+        str(result.get("name", "")).casefold() == "novel_error"
+        or str(body.get("code", "")) == "0001"
+        or str(result.get("code", "")) == "0001"
+    )
+    return has_missing_message and has_novel_error_marker
+
+
 def request_with_retries(session: requests.Session, method: str, url: str, *,
                           headers=None, params=None, json=None, data=None,
                           timeout=30, max_retries=3, backoff=1.25,
@@ -563,7 +599,7 @@ def request_with_retries(session: requests.Session, method: str, url: str, *,
                 continue
 
             return response
-        except requests.RequestException as exc:
+        except requests.RequestsError as exc:
             if const.HTTP_LOG:
                 logger.error(f"[api] {method} {url} failed on attempt {attempt}: {exc}")
             if attempt >= max_retries:

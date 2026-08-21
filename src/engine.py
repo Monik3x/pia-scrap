@@ -105,13 +105,21 @@ class ScraperEngine:
                 self.update_status("Login successful, but tokens could not be stored.")
             return True
         elif cfg_login_at and cfg_userkey:
-            self.update_status("Reusing stored authentication tokens...")
+            self.update_status("Validating stored authentication tokens...")
             self.client = NovelpiaClient(
                 email=None, password=None, proxy=self.proxy,
                 throttle=self.throttle, userkey=cfg_userkey, tkey=cfg_tkey,
                 cancel_event=self.cancel_event
             )
             self.client.tokens.login_at = cfg_login_at
+            try:
+                self.client.me()
+            except Exception as e:
+                raise RuntimeError(
+                    "Stored authentication could not be validated. "
+                    "Enter your email and password to log in again."
+                ) from e
+            self.update_status("Stored authentication is valid.")
             return True
         else:
             self.update_status("No credentials or stored tokens found.")
