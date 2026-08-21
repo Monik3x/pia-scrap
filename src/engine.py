@@ -186,7 +186,10 @@ class ScraperEngine:
                     )
 
                     if out_file is None:
-                        skipped_msg = f"Novel '{title}' is already up-to-date. Skipping."
+                        skipped_msg = (
+                            f"Novel '{title}' is already up to date "
+                            f"({count} chapters). Skipping."
+                        )
                         self.update_status(f"[skipped] {skipped_msg}")
                         results_summary.append({"novel_id": novel_id, "status": "skipped", "title": title})
                         skipped_count += 1

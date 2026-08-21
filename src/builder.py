@@ -96,10 +96,6 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
                     and existing_chapters == packaged_chapters
                     and target_chapters > 0
                 ):
-                    msg = f"'{title}' is already up to date ({existing_chapters} chapters). Skipping chapter downloads."
-                    logger.info(msg)
-                    if status_cb:
-                        status_cb(msg)
                     return None, title, existing_chapters
                 if not revisions_match:
                     logger.info(
