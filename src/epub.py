@@ -39,14 +39,24 @@ class EpubBuilder:
         self.out_dir = out_dir
         ensure_dir(out_dir)
 
-    def _fetch_bytes(self, client: NovelpiaClient, url: str, referer_url: str, episode_cookies: dict = None) -> Optional[bytes]:
+    def _fetch_bytes(
+        self,
+        client: NovelpiaClient,
+        url: str,
+        referer_url: str,
+        episode_cookies: Optional[Dict] = None,
+        episode_no: Optional[int] = None,
+    ) -> Optional[bytes]:
         url = normalize_url(url)
         if not is_approved_image_url(url):
             logger.warning(f"[warn] Blocked image URL outside approved Novelpia hosts: {url}")
             return None
 
         last_error = "Unknown Error"
-        for attempt in range(1, 4):
+        refreshed_signed_key = False
+        max_attempts = 3
+        attempt = 1
+        while attempt <= max_attempts:
             cancel_event = getattr(client, "cancel_event", None)
             if cancel_event and cancel_event.is_set():
                 raise RuntimeError("Image download cancelled by user.")
@@ -91,21 +101,49 @@ class EpubBuilder:
                         last_error = f"Blocked redirect to unapproved host: {redirect_url}"
                         break
                     url = redirect_url
+                    attempt += 1
                     continue
                 
                 if resp.status_code == 429:
                     last_error = "HTTP 429 (Too Many Requests)"
-                    if attempt < 3:
+                    if attempt < max_attempts:
                         client.sleep_cooperative(2.0 * attempt)
+                    attempt += 1
                     continue
+
+                if (
+                    resp.status_code == 403
+                    and cookie_policy == "signed"
+                    and episode_no is not None
+                    and not refreshed_signed_key
+                ):
+                    refreshed_signed_key = True
+                    try:
+                        fresh_cookies = client.episode_signed_key(episode_no)
+                        if isinstance(episode_cookies, dict):
+                            episode_cookies.clear()
+                            episode_cookies.update(fresh_cookies)
+                        else:
+                            episode_cookies = fresh_cookies
+                        logger.info(
+                            f"renewed image authorization for episode {episode_no}"
+                        )
+                        max_attempts += 1
+                        attempt += 1
+                        continue
+                    except Exception as exc:
+                        last_error = (
+                            f"HTTP 403; could not renew image authorization: {exc}"
+                        )
                     
                 resp.raise_for_status()
                 return resp.content
                 
             except Exception as e:
                 last_error = f"HTTP Error or Timeout: {e}"
-                if attempt < 3:
+                if attempt < max_attempts:
                     client.sleep_cooperative(1.0)
+            attempt += 1
                 
         logger.warning(f"[warn] Image error ({last_error}): {url}")
         return None
@@ -145,7 +183,12 @@ class EpubBuilder:
             ensure_dir(cache_dir)
             ensure_dir(image_cache_dir)
 
-        def fetch_cached_image(url: str, referer_url: str, episode_cookies=None) -> Optional[bytes]:
+        def fetch_cached_image(
+            url: str,
+            referer_url: str,
+            episode_cookies=None,
+            episode_no: Optional[int] = None,
+        ) -> Optional[bytes]:
             cancel_event = getattr(client, "cancel_event", None)
             if cancel_event and cancel_event.is_set():
                 raise RuntimeError("Image download cancelled by user.")
@@ -163,7 +206,13 @@ class EpubBuilder:
                 except OSError as exc:
                     logger.warning(f"[warn] Could not read cached image {cache_path}: {exc}")
 
-            image_bytes = self._fetch_bytes(client, url, referer_url, episode_cookies)
+            image_bytes = self._fetch_bytes(
+                client,
+                url,
+                referer_url,
+                episode_cookies,
+                episode_no=episode_no,
+            )
             if image_bytes and cache_path:
                 temp_path = cache_path + ".tmp"
                 try:
@@ -236,7 +285,10 @@ class EpubBuilder:
                 path = urlparse(src).path
                 fallback_ext = os.path.splitext(path)[1].lower() or ".jpg"
                 img_bytes = fetch_cached_image(
-                    src, referer_url=viewer_url, episode_cookies=episode_cookies
+                    src,
+                    referer_url=viewer_url,
+                    episode_cookies=episode_cookies,
+                    episode_no=int(epi_no),
                 )
                 if not img_bytes:
                     img.decompose()
@@ -285,7 +337,9 @@ class EpubBuilder:
                 cache_is_valid = False
 
             if cache_is_valid:
-                all_results[idx_offset] = cached_data
+                cached_result = dict(cached_data)
+                cached_result.pop("signed_key", None)
+                all_results[idx_offset] = cached_result
                 epi_title = ep.get("epi_title") or f"Episode {ep.get('epi_num', idx_offset+1)}"
                 logger.info(f"loaded cached episode {ep.get('epi_num', idx_offset+1)} - {epi_title}")
             else:
@@ -311,6 +365,7 @@ class EpubBuilder:
                     c_file = os.path.join(cache_dir, f"{epi_no}.json")
                     try:
                         cache_record = dict(res)
+                        cache_record.pop("signed_key", None)
                         cache_record[EPISODE_REVISION_FIELD] = episode_revisions[int(epi_no)]
                         write_json_atomic(c_file, cache_record)
                     except (OSError, TypeError, ValueError) as exc:

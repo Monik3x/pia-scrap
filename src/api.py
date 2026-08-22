@@ -281,6 +281,15 @@ class NovelpiaClient:
         r.raise_for_status()
         return r.json()
 
+    def episode_signed_key(self, episode_no: int) -> Dict[str, Any]:
+        """Request fresh signed cookies for an episode's CDN images."""
+        ticket = self.episode_ticket(episode_no)
+        result = ticket.get("result") if isinstance(ticket, dict) else None
+        signed_key = result.get("signed_key") if isinstance(result, dict) else None
+        if not isinstance(signed_key, dict) or not signed_key:
+            raise RuntimeError("Episode ticket did not contain signed image authorization.")
+        return signed_key
+
     def episode_content(self, token_t: str) -> Dict:
         url = f"{const.API_BASE}/v1/novel/episode/content"
         if self.throttle:
