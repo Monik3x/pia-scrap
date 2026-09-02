@@ -36,6 +36,20 @@ class BookOutputPaths:
     image_cache_dir: str
     image_index_path: str
 
+
+@dataclass(frozen=True)
+class LocalBookInfo:
+    """Identity and listing fields for one local book directory."""
+
+    directory_name: str
+    book_dir: str
+    novel_id: Optional[int]
+    title: str
+    author: str
+    status: str
+    chapter_count: Optional[int]
+    has_metadata: bool
+
 # ----------------------------
 # Helpers
 # ----------------------------
@@ -151,30 +165,35 @@ def _with_component_suffix(base: str, suffix: str, max_length: int = BOOK_SLUG_L
     return sanitize_path_component(prefix + suffix, max_length=max_length)
 
 
-def _book_directory_novel_id(book_dir: str) -> Optional[int]:
-    existing_id = None
+def book_directory_novel_id(book_dir: str) -> Optional[int]:
+    """Return the stored novel ID for a local book folder, if it is a positive integer."""
+
+    def parse_positive_id(value: Any) -> Optional[int]:
+        try:
+            novel_id = int(value)
+        except (TypeError, ValueError):
+            return None
+        return novel_id if novel_id > 0 else None
+
     marker_path = os.path.join(book_dir, ".novel_id")
     try:
         with open(marker_path, "r", encoding="ascii") as marker_file:
-            existing_id = marker_file.read().strip() or None
+            novel_id = parse_positive_id(marker_file.read().strip() or None)
+        if novel_id is not None:
+            return novel_id
     except OSError:
         pass
 
     meta_path = os.path.join(book_dir, "metadata.json")
-    if existing_id is None:
-        try:
-            with open(meta_path, "r", encoding="utf-8") as meta_file:
-                metadata = json.load(meta_file)
-            existing_id = metadata.get("novel_id")
-            if not existing_id:
-                match = re.search(r"/novel/(\d+)", str(metadata.get("url") or ""))
-                existing_id = match.group(1) if match else None
-        except (OSError, TypeError, ValueError, json.JSONDecodeError):
-            pass
-
     try:
-        return int(existing_id) if existing_id is not None else None
-    except (TypeError, ValueError):
+        with open(meta_path, "r", encoding="utf-8") as meta_file:
+            metadata = json.load(meta_file)
+        novel_id = parse_positive_id(metadata.get("novel_id"))
+        if novel_id is not None:
+            return novel_id
+        match = re.search(r"/novel/(\d+)", str(metadata.get("url") or ""))
+        return parse_positive_id(match.group(1) if match else None)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
         return None
 
 
@@ -193,7 +212,7 @@ def _find_existing_book_base(out_dir: str, novel_id: int, preferred_base: str) -
                 continue
         except OSError:
             continue
-        if _book_directory_novel_id(entry.path) == novel_id:
+        if book_directory_novel_id(entry.path) == novel_id:
             if entry.name == preferred_base:
                 return entry.name
             matches.append(entry.name)
@@ -220,7 +239,7 @@ def build_book_directory_index(out_dir: str) -> Dict[int, str]:
                 continue
         except OSError:
             continue
-        novel_id = _book_directory_novel_id(entry.path)
+        novel_id = book_directory_novel_id(entry.path)
         if novel_id is None:
             continue
         if novel_id in index:
@@ -232,6 +251,82 @@ def build_book_directory_index(out_dir: str) -> Dict[int, str]:
         index[novel_id] = entry.name
     return index
 
+
+def list_local_book_directories(out_dir: str) -> List[str]:
+    """Return sorted book folder names under an output root."""
+    names: List[str] = []
+    try:
+        with os.scandir(out_dir) as iterator:
+            entries = sorted(iterator, key=lambda entry: entry.name.casefold())
+    except FileNotFoundError:
+        return names
+    except OSError as exc:
+        logger.warning(f"Could not scan library directory {out_dir}: {exc}")
+        return names
+
+    for entry in entries:
+        if entry.name.startswith("."):
+            continue
+        try:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+        except OSError:
+            continue
+        names.append(entry.name)
+    return names
+
+
+def load_local_book_info(book_dir: str) -> LocalBookInfo:
+    """Load novel ID and listing fields from a local book folder."""
+    book_dir = os.fspath(book_dir)
+    directory_name = os.path.basename(os.path.normpath(book_dir)) or book_dir
+    novel_id = book_directory_novel_id(book_dir)
+
+    title = directory_name
+    author = "Unknown Author"
+    status = "Unknown"
+    chapter_count: Optional[int] = None
+    has_metadata = False
+
+    meta_path = os.path.join(book_dir, "metadata.json")
+    try:
+        with open(meta_path, "r", encoding="utf-8") as meta_file:
+            metadata = json.load(meta_file)
+        if not isinstance(metadata, dict):
+            raise ValueError("metadata root must be an object")
+        has_metadata = True
+        title = metadata.get("title") or title
+        author = metadata.get("author") or author
+        status = str(metadata.get("status") or status)
+        try:
+            chapter_count = int(metadata.get("chapter", 0))
+        except (TypeError, ValueError):
+            chapter_count = 0
+    except FileNotFoundError:
+        pass
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning(f"Ignoring invalid local book metadata {meta_path}: {exc}")
+
+    return LocalBookInfo(
+        directory_name=directory_name,
+        book_dir=book_dir,
+        novel_id=novel_id,
+        title=title,
+        author=author,
+        status=status,
+        chapter_count=chapter_count,
+        has_metadata=has_metadata,
+    )
+
+
+def local_library_novel_ids(out_dir: str) -> List[int]:
+    """Collect unique novel IDs from local book folders, marker first."""
+    ids: List[int] = []
+    for name in list_local_book_directories(out_dir):
+        novel_id = book_directory_novel_id(os.path.join(out_dir, name))
+        if novel_id is not None:
+            ids.append(novel_id)
+    return unique_in_order(ids)
 
 def book_base(
     out_dir: str,
@@ -246,7 +341,7 @@ def book_base(
 
     # The overwhelmingly common case should require one directory check, not a
     # scan of the entire library.
-    if os.path.isdir(preferred_dir) and _book_directory_novel_id(preferred_dir) == novel_id:
+    if os.path.isdir(preferred_dir) and book_directory_novel_id(preferred_dir) == novel_id:
         return base
 
     if book_index is None:
@@ -269,7 +364,7 @@ def book_base(
         book_dir = os.path.join(out_dir, candidate)
         if not os.path.isdir(book_dir):
             return candidate
-        if _book_directory_novel_id(book_dir) == novel_id:
+        if book_directory_novel_id(book_dir) == novel_id:
             return candidate
 
 

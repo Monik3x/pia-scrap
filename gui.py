@@ -1,6 +1,4 @@
 import os
-import re
-import json
 import queue
 import logging
 import threading
@@ -12,7 +10,7 @@ import customtkinter as ctk
 from tkinter import filedialog, messagebox
 
 from src.engine import ScraperEngine
-from src.helper import load_config
+from src.helper import list_local_book_directories, load_config, load_local_book_info, local_library_novel_ids
 from src import const
 
 ctk.set_appearance_mode("System")  # Options: "System", "Dark", "Light"
@@ -138,7 +136,11 @@ class PiaScrapGUI(ctk.CTk):
         browse_btn.grid(row=2, column=1, padx=(0, 10), pady=5, sticky="ew")
         
         self.format_var = ctk.StringVar(value="EPUB")
-        format_switch = ctk.CTkSegmentedButton(opts_frame, values=["EPUB", "TXT"], variable=self.format_var)
+        format_switch = ctk.CTkSegmentedButton(
+            opts_frame,
+            values=["EPUB", "TXT"],
+            variable=self.format_var,
+        )
         format_switch.grid(row=3, column=0, columnspan=2, padx=10, pady=(5, 10), sticky="ew")
         
         # Advanced Scraper Config
@@ -176,6 +178,7 @@ class PiaScrapGUI(ctk.CTk):
         self.update_switch = ctk.CTkSwitch(adv_frame, text="Update Mode (Use Cache)")
         self.update_switch.select()  # Enable by default
         self.update_switch.grid(row=6, column=0, columnspan=2, padx=10, pady=5, sticky="w")
+        format_switch.configure(command=self.on_format_changed)
         
         self.debug_switch = ctk.CTkSwitch(adv_frame, text="Verbose Debug Mode")
         self.debug_switch.grid(row=7, column=0, columnspan=2, padx=10, pady=(5, 10), sticky="w")
@@ -279,6 +282,15 @@ class PiaScrapGUI(ctk.CTk):
         if int(val) > 1:
             self.append_to_log("[GUI-WARN] Choosing > 1 threads increases the risk of triggering Novelpia's strict IP rate-limits (HTTP 429). Leave at 1 for best results.")
 
+    def on_format_changed(self, value):
+        self._sync_update_switch_state()
+
+    def _sync_update_switch_state(self, inputs_enabled: bool = True):
+        if inputs_enabled and self.format_var.get() != "TXT":
+            self.update_switch.configure(state="normal")
+        else:
+            self.update_switch.configure(state="disabled")
+
     def import_from_env(self):
         load_dotenv(override=True)
         env_email = os.getenv("NOVELPIA_EMAIL", "").strip()
@@ -314,21 +326,7 @@ class PiaScrapGUI(ctk.CTk):
     def full_scan_library(self):
         """Scans the directories instantly on disk. Does NOT load JSON metadata yet."""
         out_dir = self.output_entry.get().strip() or "output"
-        if not os.path.exists(out_dir):
-            self.library_dirs = []
-            self.filtered_dirs = []
-            self.current_page = 0
-            self.display_current_page()
-            return
-            
-        try:
-            # Quick listdir (sub-millisecond even with k's of folders)
-            dirs = [d for d in os.listdir(out_dir) if os.path.isdir(os.path.join(out_dir, d)) and not d.startswith(".")]
-            self.library_dirs = sorted(dirs)
-        except Exception as e:
-            self.logger.error(f"Error reading library directory: {e}")
-            self.library_dirs = []
-
+        self.library_dirs = list_local_book_directories(out_dir)
         self.on_search_changed()
 
     def on_search_changed(self):
@@ -372,35 +370,12 @@ class PiaScrapGUI(ctk.CTk):
         out_dir = self.output_entry.get().strip() or "output"
 
         for item in page_slice:
-            item_path = os.path.join(out_dir, item)
-            meta_path = os.path.join(item_path, "metadata.json")
-            
-            # Use data fallbacks if metadata file doesn't exist yet
-            title = item
-            author = "Unknown Author"
-            chapters = "Unchecked"
-            status = "Unknown"
-            novel_id = None
-            
-            if os.path.exists(meta_path):
-                try:
-                    with open(meta_path, "r", encoding="utf-8") as f:
-                        meta = json.load(f)
-                    title = meta.get("title") or title
-                    author = meta.get("author") or author
-                    chapters = str(meta.get("chapter", "0"))
-                    status = str(meta.get("status") or status)
-
-                    stored_id = meta.get("novel_id")
-                    if stored_id and int(stored_id) > 0:
-                        novel_id = str(int(stored_id))
-                    else:
-                        url = meta.get("url", "")
-                        match = re.search(r'/novel/(\d+)', url)
-                        if match:
-                            novel_id = match.group(1)
-                except Exception as e:
-                    self.logger.error(f"Failed loading metadata for {item}: {e}")
+            info = load_local_book_info(os.path.join(out_dir, item))
+            title = info.title
+            author = info.author
+            chapters = str(info.chapter_count) if info.has_metadata else "Unchecked"
+            status = info.status
+            novel_id = info.novel_id
             
             # Row layout container
             row = ctk.CTkFrame(self.library_scroll, corner_radius=6)
@@ -447,13 +422,14 @@ class PiaScrapGUI(ctk.CTk):
     def trigger_library_update(self, novel_id):
         """Pushes target data back to download parameters tab and automatically starts processing updates."""
         if not novel_id:
-            messagebox.showerror("Missing Novel ID", "This folder's metadata does not contain a valid Novel ID.")
+            messagebox.showerror("Missing Novel ID", "This folder does not contain a valid Novel ID.")
             return
+        self.format_var.set("EPUB")
+        self._sync_update_switch_state()
         self.ids_entry.delete(0, "end")
         self.ids_entry.insert(0, str(novel_id))
-        
         self.update_switch.select()
-        
+
         # Switch tabs and begin background download
         self.nav_var.set("Downloader")
         self.on_nav_changed("Downloader")
@@ -465,40 +441,26 @@ class PiaScrapGUI(ctk.CTk):
         if not os.path.exists(out_dir):
             messagebox.showwarning("Warning", "Output directory does not exist yet.")
             return
-            
-        dirs = [d for d in os.listdir(out_dir) if os.path.isdir(os.path.join(out_dir, d)) and not d.startswith(".")]
+
+        dirs = list_local_book_directories(out_dir)
         if not dirs:
             messagebox.showwarning("Warning", "No local novel folders located to update.")
             return
-            
-        valid_ids = []
-        for item in dirs:
-            meta_path = os.path.join(out_dir, item, "metadata.json")
-            if os.path.exists(meta_path):
-                try:
-                    with open(meta_path, "r", encoding="utf-8") as f:
-                        meta = json.load(f)
-                    nid = meta.get("novel_id")
-                    if not nid:
-                        url = meta.get("url", "")
-                        match = re.search(r'/novel/(\d+)', url)
-                        if match:
-                            nid = match.group(1)
-                    if nid and int(nid) > 0:
-                        valid_ids.append(str(int(nid)))
-                except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                    self.logger.warning(f"Could not read Novel ID from {meta_path}: {exc}")
-        
+
+        valid_ids = [str(novel_id) for novel_id in local_library_novel_ids(out_dir)]
         if not valid_ids:
-            messagebox.showwarning("No IDs Found", "Could not locate valid Novel IDs inside the metadata logs of your local library folders.")
+            messagebox.showwarning(
+                "No IDs Found",
+                "Could not locate valid Novel IDs in .novel_id markers or metadata of your local library folders.",
+            )
             return
-            
-        all_target_ids = ", ".join(valid_ids)
-        
+
+        self.format_var.set("EPUB")
+        self._sync_update_switch_state()
         self.ids_entry.delete(0, "end")
-        self.ids_entry.insert(0, all_target_ids)
+        self.ids_entry.insert(0, ", ".join(valid_ids))
         self.update_switch.select()
-        
+
         self.nav_var.set("Downloader")
         self.on_nav_changed("Downloader")
         self.start_scraper()
@@ -531,8 +493,11 @@ class PiaScrapGUI(ctk.CTk):
     def _set_input_states(self, enabled: bool):
         state = "normal" if enabled else "disabled"
         for widget in self.all_input_fields:
+            if widget is self.update_switch:
+                continue
             if hasattr(widget, "configure"):
                 widget.configure(state=state)
+        self._sync_update_switch_state(inputs_enabled=enabled)
 
     # ----------------------------
     # Thread Processing Loop
@@ -574,7 +539,7 @@ class PiaScrapGUI(ctk.CTk):
             return
             
         lang = self.lang_entry.get().strip() or "en"
-        update_mode = self.update_switch.get()
+        update_mode = bool(self.update_switch.get()) and not txt_mode
         debug_mode = self.debug_switch.get()
         
         const.HTTP_LOG = bool(debug_mode)

@@ -22,7 +22,11 @@ def main():
     ap.add_argument("--debug", "-v", action="store_true", help="Enable verbose diagnostics and request-failure logs")
     ap.add_argument("--throttle", type=float, default=1.5, help="Seconds delay between episode requests (default: 1.5; 0 disables)")
     ap.add_argument("--txt", "-txt", action="store_true", help="Output plain .txt files per episode instead of EPUB")
-    ap.add_argument("--update", action="store_true", help="Only download new chapters and update existing EPUB via local cache")
+    ap.add_argument(
+        "--update",
+        action="store_true",
+        help="EPUB only. Reuse the local cache to skip unchanged chapters. Ignored with --txt",
+    )
     ap.add_argument("--threads", type=int, default=1, help="Number of workers sending requests (default: 1), recommended to leave as is")
     args = ap.parse_args()
 

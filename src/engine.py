@@ -5,8 +5,16 @@ from typing import List, Optional, Callable, Dict, Any
 from src.api import NovelUnavailableError, NovelpiaClient
 from src.builder import build_epub, build_txt
 from src.helper import build_book_directory_index, load_config, save_config, parse_range
+from src.novel import NoEpisodesError, NoMetadataError, NovelSkipError
 
 logger = logging.getLogger("pia_scrap")
+
+def _skip_warning(exc: NovelSkipError) -> str:
+    text = str(exc).rstrip()
+    if not text.endswith("."):
+        text += "."
+    return f"{text} Skipping."
+
 
 class ScraperEngine:
     def __init__(self, email: Optional[str] = None, password: Optional[str] = None,
@@ -143,6 +151,12 @@ class ScraperEngine:
         if not self.client:
             raise RuntimeError("Client not initialized. Call initialize_client first.")
 
+        update_mode = self.update_mode and not self.txt_mode
+        if self.txt_mode and self.update_mode:
+            self.update_status(
+                "[warn] Update mode is EPUB-only and is ignored for TXT output."
+            )
+
         success_count = 0
         fail_count = 0
         skipped_count = 0
@@ -186,7 +200,7 @@ class ScraperEngine:
                         out_dir=self.out_dir,
                         max_chapters=(self.max_chapters if self.max_chapters > 0 else None),
                         language=self.language,
-                        update_mode=self.update_mode,
+                        update_mode=update_mode,
                         threads=self.threads,
                         progress_cb=self.update_progress,
                         status_cb=self.update_status,
@@ -215,18 +229,9 @@ class ScraperEngine:
                 err_str = str(e)
                 response = getattr(e, "response", None)
                 status_code = getattr(response, "status_code", None)
-                if isinstance(e, NovelUnavailableError):
-                    warn_msg = f"{e} Skipping."
-                    self.update_status(f"[warn] {warn_msg}")
-                    results_summary.append({"novel_id": novel_id, "status": "not_exist"})
-                elif isinstance(e, ValueError) and "returned no metadata" in err_str:
-                    warn_msg = f"Novel {novel_id} does not exist or has no metadata. Skipping."
-                    self.update_status(f"[warn] {warn_msg}")
-                    results_summary.append({"novel_id": novel_id, "status": "not_exist"})
-                elif isinstance(e, ValueError) and "has no downloadable episodes" in err_str:
-                    warn_msg = f"Novel {novel_id} has no downloadable episodes. Skipping."
-                    self.update_status(f"[warn] {warn_msg}")
-                    results_summary.append({"novel_id": novel_id, "status": "no_data"})
+                if isinstance(e, NovelSkipError):
+                    self.update_status(f"[warn] {_skip_warning(e)}")
+                    results_summary.append({"novel_id": novel_id, "status": e.result_status})
                 elif status_code == 404:
                     warn_msg = f"Novel {novel_id} returned 404. Skipping."
                     self.update_status(f"[warn] {warn_msg}")

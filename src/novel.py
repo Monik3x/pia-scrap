@@ -33,6 +33,20 @@ EPUB_TAG_ATTRIBUTES = {
 }
 SAFE_LINK_SCHEMES = {"http", "https", "mailto"}
 
+class NovelSkipError(ValueError):
+    """A novel the download queue should skip instead of failing the run."""
+
+    result_status = "failed"
+
+class NoMetadataError(NovelSkipError):
+    """The novel payload had no usable metadata."""
+
+    result_status = "not_exist"
+
+class NoEpisodesError(NovelSkipError):
+    """The novel has no downloadable prose episodes."""
+
+    result_status = "no_data"
 
 @dataclass(frozen=True)
 class NovelMetadata:
@@ -63,10 +77,10 @@ def parse_novel_metadata(
 ) -> NovelMetadata:
     """Validate a novel API payload and normalize metadata used by all outputs."""
     if not isinstance(data, dict):
-        raise ValueError("Novel response returned no metadata.")
+        raise NoMetadataError("Novel response returned no metadata.")
     result = data.get("result")
     if not isinstance(result, dict) or not isinstance(result.get("novel"), dict):
-        raise ValueError("Novel response returned no metadata.")
+        raise NoMetadataError("Novel response returned no metadata.")
 
     nv = result["novel"]
     raw_novel_id = novel_id if novel_id is not None else nv.get("novel_no")
@@ -181,8 +195,8 @@ def fetch_novel_and_episodes(client, novel_id, max_chapters=None):
 
     try:
         metadata = parse_novel_metadata(data_novel, novel_id)
-    except ValueError as exc:
-        raise ValueError(f"Novel {novel_id} returned no metadata.") from exc
+    except NoMetadataError as exc:
+        raise NoMetadataError(f"Novel {novel_id} returned no metadata.") from exc
 
     logger.info(
         f"title='{metadata.title}' author='{metadata.author}' "
@@ -190,7 +204,7 @@ def fetch_novel_and_episodes(client, novel_id, max_chapters=None):
     )
 
     if metadata.episode_count == 0:
-        raise ValueError(f"Novel {novel_id} has no downloadable episodes.")
+        raise NoEpisodesError(f"Novel {novel_id} has no downloadable episodes.")
 
     data_list = client.episode_list(novel_id, rows=metadata.episode_count)
     if not isinstance(data_list, dict):
@@ -214,6 +228,6 @@ def fetch_novel_and_episodes(client, novel_id, max_chapters=None):
         ep_list = ep_list[:int(max_chapters)]
 
     if not ep_list:
-        raise ValueError(f"Novel {novel_id} has no downloadable episodes.")
+        raise NoEpisodesError(f"Novel {novel_id} has no downloadable episodes.")
 
     return data_novel, ep_list, metadata.title

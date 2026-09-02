@@ -64,6 +64,25 @@ def _chapter_revisions_match(chapters_path: str, episodes: List[Dict]) -> bool:
 
     return True
 
+
+def should_skip_epub_update(
+    *,
+    revisions_match: bool,
+    epub_exists: bool,
+    existing_chapters: int,
+    packaged_chapters: int,
+    target_chapters: int,
+) -> bool:
+    """Skip rebuild when the local EPUB already covers the requested chapters."""
+    return (
+        revisions_match
+        and epub_exists
+        and target_chapters > 0
+        and existing_chapters == packaged_chapters
+        and existing_chapters >= target_chapters
+    )
+
+
 def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", update_mode=False, threads=1,
                progress_cb: Optional[Callable[[int, int, str], None]] = None,
                status_cb: Optional[Callable[[str], None]] = None,
@@ -77,6 +96,7 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
     if update_mode:
         meta_path = paths.metadata_path
         epub_path = paths.epub_path
+        existing_chapters = None
 
         if os.path.exists(meta_path):
             try:
@@ -88,13 +108,12 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
                 target_chapters = len(ep_list)
                 revisions_match = _chapter_revisions_match(paths.chapters_path, ep_list)
                 packaged_chapters = _epub_chapter_count(epub_path) if os.path.exists(epub_path) else -1
-                if (
-                    revisions_match
-                    and os.path.exists(epub_path)
-                    and existing_chapters >= target_chapters
-                    and packaged_chapters >= target_chapters
-                    and existing_chapters == packaged_chapters
-                    and target_chapters > 0
+                if should_skip_epub_update(
+                    revisions_match=revisions_match,
+                    epub_exists=os.path.exists(epub_path),
+                    existing_chapters=existing_chapters,
+                    packaged_chapters=packaged_chapters,
+                    target_chapters=target_chapters,
                 ):
                     return None, title, existing_chapters
                 if not revisions_match:
@@ -107,7 +126,25 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
                         f"chapters but the EPUB contains {max(packaged_chapters, 0)}."
                     )
             except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                existing_chapters = None
                 logger.warning(f"[warn] Ignoring invalid update metadata {meta_path}: {exc}")
+
+        if (
+            existing_chapters is not None
+            and max_chapters
+            and existing_chapters > len(ep_list)
+        ):
+            logger.info(
+                f"Rebuilding '{title}' without reducing {existing_chapters} local "
+                f"chapters to {len(ep_list)}."
+            )
+            if status_cb:
+                status_cb(
+                    "Fetching full episode list so update does not shrink the local book..."
+                )
+            data_novel, ep_list, title = fetch_novel_and_episodes(
+                client, novel_id, max_chapters=None
+            )
 
     if status_cb:
         status_cb("Downloading chapters and building EPUB...")

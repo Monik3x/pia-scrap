@@ -18,7 +18,7 @@ from src.helper import (
     save_config,
     unique_in_order,
 )
-from src.novel import html_from_episode_text
+from src.novel import NoEpisodesError, NovelSkipError, html_from_episode_text
 
 logger = logging.getLogger("pia_scrap")
 
@@ -26,8 +26,10 @@ logger = logging.getLogger("pia_scrap")
 # API Client
 # ----------------------------
 
-class NovelUnavailableError(ValueError):
+class NovelUnavailableError(NovelSkipError):
     """The requested novel ID is not assigned or is unavailable."""
+
+    result_status = "not_exist"
 
 
 @dataclass
@@ -118,30 +120,52 @@ class NovelpiaClient:
         if const.HTTP_LOG:
             logger.warning(f"[api] Increased throttle from {old}s to {self.throttle}s due to rate limit.")
 
+    def _api_request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Optional[dict] = None,
+        params: Optional[dict] = None,
+        json: Optional[dict] = None,
+        data: Any = None,
+        max_retries: int = 3,
+        allow_refresh: bool = True,
+    ):
+        """Authenticated JSON API call with shared refresh, login, and rate-limit recovery."""
+        request_headers = headers
+        if request_headers is None:
+            request_headers = merge_login_at({}, self.tokens.login_at)
+        return request_with_retries(
+            self.s,
+            method,
+            url,
+            headers=request_headers,
+            params=params,
+            json=json,
+            data=data,
+            timeout=self.timeout,
+            max_retries=max_retries,
+            allow_refresh=allow_refresh,
+            refresh_fn=self.refresh,
+            login_fn=self.login,
+            on_rate_limit=self._on_rate_limit,
+            cancel_event=self.cancel_event,
+        )
+
     def me(self) -> Dict:
         url = f"{const.API_BASE}/v1/login/me"
-        r = request_with_retries(
-            self.s, "GET", url,
-            headers=merge_login_at({}, self.tokens.login_at),
-            timeout=self.timeout, allow_refresh=True, 
-            refresh_fn=self.refresh, login_fn=self.login,
-            on_rate_limit=self._on_rate_limit,
-            cancel_event=self.cancel_event
-        )
+        r = self._api_request("GET", url)
         r.raise_for_status()
         return r.json()
 
     def novel(self, novel_id: int) -> Dict:
         url = f"{const.API_BASE}/v1/novel"
-        r = request_with_retries(
-            self.s, "GET", url,
-            headers=merge_login_at({}, self.tokens.login_at),
+        r = self._api_request(
+            "GET",
+            url,
             params={"novel_no": novel_id},
-            timeout=self.timeout, allow_refresh=True, 
-            refresh_fn=self.refresh, login_fn=self.login,
-            on_rate_limit=self._on_rate_limit,
-            max_retries=1,  # Most likely error here is 500 from accessing an empty/invalid novel_id, limit time lost backing off
-            cancel_event=self.cancel_event
+            max_retries=1,  # Empty/invalid IDs return 500; skip extra backoff
         )
         if _response_indicates_missing_novel(r):
             raise NovelUnavailableError(
@@ -152,18 +176,14 @@ class NovelpiaClient:
 
     def episode_list(self, novel_id: int, rows: int) -> Dict:
         url = f"{const.API_BASE}/v1/novel/episode/list"
-        r = request_with_retries(
-            self.s, "GET", url,
-            headers=merge_login_at({}, self.tokens.login_at),
+        r = self._api_request(
+            "GET",
+            url,
             params={"novel_no": novel_id, "rows": rows, "sort": "ASC"},
-            timeout=self.timeout, allow_refresh=True, 
-            refresh_fn=self.refresh, login_fn=self.login,
-            on_rate_limit=self._on_rate_limit,
             max_retries=1,
-            cancel_event=self.cancel_event
         )
         if _response_indicates_missing_episodes(r):
-            raise ValueError(f"Novel {novel_id} has no downloadable episodes.")
+            raise NoEpisodesError(f"Novel {novel_id} has no downloadable episodes.")
         r.raise_for_status()
         return r.json()
     
@@ -186,15 +206,7 @@ class NovelpiaClient:
                 "like_filter": 0
             }
             
-            r = request_with_retries(
-                self.s, "GET", url,
-                params=params,
-                headers=merge_login_at({}, self.tokens.login_at),
-                timeout=self.timeout, allow_refresh=True, 
-                refresh_fn=self.refresh, login_fn=self.login,
-                on_rate_limit=self._on_rate_limit,
-                cancel_event=self.cancel_event
-            )
+            r = self._api_request("GET", url, params=params)
             r.raise_for_status()
             data = r.json()
             
@@ -223,15 +235,7 @@ class NovelpiaClient:
             raise ValueError("rows must be at least 1")
 
         url = f"{const.API_BASE}/v1/novel/list"
-        r = request_with_retries(
-            self.s, "GET", url,
-            params={"rows": rows},
-            headers=merge_login_at({}, self.tokens.login_at),
-            timeout=self.timeout, allow_refresh=True,
-            refresh_fn=self.refresh, login_fn=self.login,
-            on_rate_limit=self._on_rate_limit,
-            cancel_event=self.cancel_event,
-        )
+        r = self._api_request("GET", url, params={"rows": rows})
         r.raise_for_status()
         data = r.json()
 
@@ -272,13 +276,8 @@ class NovelpiaClient:
         if self.cancel_event and self.cancel_event.is_set():
             raise RuntimeError("Request cancelled by user request.")
 
-        r = request_with_retries(
-            self.s, "GET", url,
-            headers=headers, params=params,
-            timeout=self.timeout, allow_refresh=True, 
-            refresh_fn=self.refresh, login_fn=self.login,
-            on_rate_limit=self._on_rate_limit, max_retries=4,
-            cancel_event=self.cancel_event
+        r = self._api_request(
+            "GET", url, headers=headers, params=params, max_retries=4
         )
         r.raise_for_status()
         return r.json()
@@ -300,13 +299,8 @@ class NovelpiaClient:
         if self.cancel_event and self.cancel_event.is_set():
             raise RuntimeError("Request cancelled by user request.")
 
-        r = request_with_retries(
-            self.s, "GET", url,
-            params={"_t": token_t},
-            timeout=self.timeout, max_retries=3,
-            allow_refresh=True, refresh_fn=self.refresh, login_fn=self.login,
-            on_rate_limit=self._on_rate_limit,
-            cancel_event=self.cancel_event
+        r = self._api_request(
+            "GET", url, params={"_t": token_t}, max_retries=3
         )
         r.raise_for_status()
         return r.json()
