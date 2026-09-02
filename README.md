@@ -97,7 +97,8 @@ Files are written to `output/<title>/`:
 ```text
 output/<title>/<title>.epub
 output/<title>/<episode-title>.txt   # if --txt is used
-output/<title>/.raw_cache/           # episode and image cache if --update is used
+output/<title>/.raw_cache/           # episode JSON if --update is used
+output/<title>/.raw_cache/image_index.json  # URL to content-hash map for EPUB image reuse
 output/<title>/chapters.jsonl        # chapter URLs and per-episode revision markers
 ```
 ---

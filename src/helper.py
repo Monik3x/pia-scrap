@@ -34,6 +34,7 @@ class BookOutputPaths:
     novel_id_path: str
     cache_dir: str
     image_cache_dir: str
+    image_index_path: str
 
 # ----------------------------
 # Helpers
@@ -306,6 +307,7 @@ def book_output_paths(
         novel_id_path=os.path.join(book_dir, ".novel_id"),
         cache_dir=cache_dir,
         image_cache_dir=os.path.join(cache_dir, "images"),
+        image_index_path=os.path.join(cache_dir, "image_index.json"),
     )
 
 def unique_in_order(values: List[int]) -> List[int]:

@@ -3,8 +3,10 @@ import hashlib
 import os
 import json
 import logging
+import shutil
+import zipfile
 
-from typing import Dict, List, Optional, Tuple, Callable
+from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 from ebooklib import epub
@@ -29,6 +31,228 @@ from src.helper import (
 from src.novel import html_from_episode_text, parse_novel_metadata
 
 logger = logging.getLogger("pia_scrap")
+
+IMAGE_INDEX_VERSION = 1
+_COVER_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg"}
+
+
+def image_digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _is_safe_epub_image_name(file_name: str) -> bool:
+    if not file_name or ".." in file_name or file_name.startswith("/") or "\\" in file_name:
+        return False
+    if file_name.startswith("images/"):
+        rest = file_name[len("images/"):]
+        return bool(rest) and "/" not in rest and "\\" not in rest
+    root, ext = os.path.splitext(file_name)
+    return root == "cover" and ext.lower() in _COVER_EXTENSIONS
+
+
+def _load_image_index(path: str) -> Dict[str, Dict[str, str]]:
+    """Return URL -> {sha256, file} from a previous update-mode build."""
+    try:
+        with open(path, "r", encoding="utf-8") as index_file:
+            data = json.load(index_file)
+    except FileNotFoundError:
+        return {}
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning(f"[warn] Ignoring invalid image index {path}: {exc}")
+        return {}
+
+    if not isinstance(data, dict) or data.get("version") != IMAGE_INDEX_VERSION:
+        return {}
+    images = data.get("images")
+    if not isinstance(images, dict):
+        return {}
+
+    result: Dict[str, Dict[str, str]] = {}
+    for url, entry in images.items():
+        if not isinstance(url, str) or not url or not isinstance(entry, dict):
+            continue
+        digest = entry.get("sha256")
+        file_name = entry.get("file")
+        if not isinstance(digest, str) or len(digest) != 64:
+            continue
+        if not isinstance(file_name, str) or not _is_safe_epub_image_name(file_name):
+            continue
+        result[normalize_url(url)] = {
+            "sha256": digest.lower(),
+            "file": file_name,
+        }
+    return result
+
+
+def _write_image_index(path: str, images: Dict[str, Dict[str, str]]) -> None:
+    write_json_atomic(
+        path,
+        {"version": IMAGE_INDEX_VERSION, "images": images},
+        indent=2,
+    )
+
+
+def _zip_member_bytes(
+    archive: zipfile.ZipFile,
+    names: set,
+    file_name: str,
+) -> Optional[bytes]:
+    if not _is_safe_epub_image_name(file_name):
+        return None
+    for candidate in (file_name, f"EPUB/{file_name}"):
+        if candidate not in names:
+            continue
+        try:
+            return archive.read(candidate)
+        except (OSError, zipfile.BadZipFile, KeyError) as exc:
+            logger.warning(f"[warn] Could not read {file_name} from EPUB: {exc}")
+            return None
+    return None
+
+
+def _legacy_image_cache_path(image_cache_dir: str, url: str) -> str:
+    return os.path.join(
+        image_cache_dir,
+        hashlib.sha256(url.encode("utf-8")).hexdigest() + ".bin",
+    )
+
+
+def _read_legacy_image_cache(image_cache_dir: str, url: str) -> Optional[bytes]:
+    cache_path = _legacy_image_cache_path(image_cache_dir, url)
+    try:
+        with open(cache_path, "rb") as image_file:
+            cached_bytes = image_file.read()
+        if cached_bytes:
+            return cached_bytes
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        logger.warning(f"[warn] Could not read cached image {cache_path}: {exc}")
+    return None
+
+
+def _remove_legacy_image_cache(image_cache_dir: str) -> None:
+    if not os.path.isdir(image_cache_dir):
+        return
+    try:
+        shutil.rmtree(image_cache_dir)
+    except OSError as exc:
+        logger.warning(
+            f"[warn] Could not remove leftover image cache {image_cache_dir}: {exc}"
+        )
+
+
+class _EpubImageStore:
+    """Resolve image bytes from the previous EPUB, leftover URL cache, or a download."""
+
+    def __init__(
+        self,
+        paths: BookOutputPaths,
+        update_mode: bool,
+        cancel_event=None,
+    ):
+        self.paths = paths
+        self.update_mode = update_mode
+        self.cancel_event = cancel_event
+        self.url_to_digest: Dict[str, str] = {}
+        self.digest_bytes: Dict[str, bytes] = {}
+        self.digest_file: Dict[str, str] = {}
+        self.url_file: Dict[str, str] = {}
+        self._reused = 0
+        if update_mode:
+            self._prime_from_index_and_epub()
+
+    def _raise_if_cancelled(self) -> None:
+        if self.cancel_event and self.cancel_event.is_set():
+            raise RuntimeError("Image download cancelled by user.")
+
+    def _prime_from_index_and_epub(self) -> None:
+        index = _load_image_index(self.paths.image_index_path)
+        for url, entry in index.items():
+            self.url_to_digest[url] = entry["sha256"]
+        epub_path = self.paths.epub_path
+        if not index or not os.path.isfile(epub_path):
+            return
+        try:
+            with zipfile.ZipFile(epub_path) as archive:
+                names = set(archive.namelist())
+                for entry in index.values():
+                    digest = entry["sha256"]
+                    if digest in self.digest_bytes:
+                        continue
+                    data = _zip_member_bytes(archive, names, entry["file"])
+                    if data and image_digest(data) == digest:
+                        self.digest_bytes[digest] = data
+                        self._reused += 1
+        except (OSError, zipfile.BadZipFile) as exc:
+            logger.warning(f"[warn] Could not open existing EPUB for image reuse: {exc}")
+        if self._reused:
+            logger.info(f"Reusing {self._reused} unique images from the existing EPUB.")
+
+    def _bytes_for(self, url: str, fetch: Callable[[], Optional[bytes]]) -> Optional[bytes]:
+        digest = self.url_to_digest.get(url)
+        if digest and digest in self.digest_bytes:
+            return self.digest_bytes[digest]
+
+        if self.update_mode:
+            legacy = _read_legacy_image_cache(self.paths.image_cache_dir, url)
+            if legacy:
+                digest = image_digest(legacy)
+                self.url_to_digest[url] = digest
+                self.digest_bytes.setdefault(digest, legacy)
+                return self.digest_bytes[digest]
+
+        image_bytes = fetch()
+        if not image_bytes:
+            return None
+        digest = image_digest(image_bytes)
+        self.url_to_digest[url] = digest
+        self.digest_bytes.setdefault(digest, image_bytes)
+        return self.digest_bytes[digest]
+
+    def _assign_filename(self, url: str, data: bytes, *, as_cover: bool) -> str:
+        digest = self.url_to_digest[url]
+        existing = self.digest_file.get(digest)
+        if existing:
+            self.url_file[url] = existing
+            return existing
+        fallback_ext = os.path.splitext(urlparse(url).path)[1]
+        ext, _ = image_type(data, fallback_ext)
+        file_name = f"cover{ext}" if as_cover else f"images/{digest}{ext}"
+        self.digest_file[digest] = file_name
+        self.url_file[url] = file_name
+        return file_name
+
+    def resolve(
+        self,
+        url: str,
+        fetch: Callable[[], Optional[bytes]],
+        *,
+        as_cover: bool = False,
+    ) -> Optional[Tuple[bytes, str]]:
+        self._raise_if_cancelled()
+        url = normalize_url(url)
+        data = self._bytes_for(url, fetch)
+        if not data:
+            return None
+        return data, self._assign_filename(url, data, as_cover=as_cover)
+
+    def commit(self) -> None:
+        if self.update_mode:
+            images: Dict[str, Dict[str, str]] = {}
+            for url, file_name in self.url_file.items():
+                digest = self.url_to_digest.get(url)
+                if not digest or not _is_safe_epub_image_name(file_name):
+                    continue
+                images[url] = {"sha256": digest, "file": file_name}
+            try:
+                ensure_dir(self.paths.cache_dir)
+                _write_image_index(self.paths.image_index_path, images)
+            except OSError as exc:
+                logger.warning(
+                    f"[warn] Could not write image index {self.paths.image_index_path}: {exc}"
+                )
+        _remove_legacy_image_cache(self.paths.image_cache_dir)
 
 # ----------------------------
 # EPUB Builder
@@ -178,54 +402,14 @@ class EpubBuilder:
 
         # --- Setup Cache Directory ---
         cache_dir = paths.cache_dir
-        image_cache_dir = paths.image_cache_dir
         if update_mode:
             ensure_dir(cache_dir)
-            ensure_dir(image_cache_dir)
-
-        def fetch_cached_image(
-            url: str,
-            referer_url: str,
-            episode_cookies=None,
-            episode_no: Optional[int] = None,
-        ) -> Optional[bytes]:
-            cancel_event = getattr(client, "cancel_event", None)
-            if cancel_event and cancel_event.is_set():
-                raise RuntimeError("Image download cancelled by user.")
-            cache_path = None
-            if update_mode:
-                cache_name = hashlib.sha256(url.encode("utf-8")).hexdigest() + ".bin"
-                cache_path = os.path.join(image_cache_dir, cache_name)
-                try:
-                    with open(cache_path, "rb") as image_file:
-                        cached_bytes = image_file.read()
-                    if cached_bytes:
-                        return cached_bytes
-                except FileNotFoundError:
-                    pass
-                except OSError as exc:
-                    logger.warning(f"[warn] Could not read cached image {cache_path}: {exc}")
-
-            image_bytes = self._fetch_bytes(
-                client,
-                url,
-                referer_url,
-                episode_cookies,
-                episode_no=episode_no,
-            )
-            if image_bytes and cache_path:
-                temp_path = cache_path + ".tmp"
-                try:
-                    with open(temp_path, "wb") as image_file:
-                        image_file.write(image_bytes)
-                    os.replace(temp_path, cache_path)
-                except OSError as exc:
-                    logger.warning(f"[warn] Could not cache image {url}: {exc}")
-                    try:
-                        os.remove(temp_path)
-                    except FileNotFoundError:
-                        pass
-            return image_bytes
+        image_store = _EpubImageStore(
+            paths,
+            update_mode,
+            cancel_event=getattr(client, "cancel_event", None),
+        )
+        embedded_files = set()
 
         book = epub.EpubBook()
         book.set_identifier(f"novelpia-{metadata.novel_id}")
@@ -238,14 +422,22 @@ class EpubBuilder:
             novel_fields.get("novel_full_img") or novel_fields.get("novel_img") or ""
         )
         novel_referer = f"{BASE_URL}/novel/{resolved_novel_id}" if resolved_novel_id else f"{BASE_URL}/"
-        cover_bytes = fetch_cached_image(cover_url, referer_url=novel_referer) if cover_url else None
+        cover_resolved = (
+            image_store.resolve(
+                cover_url,
+                lambda: self._fetch_bytes(client, cover_url, novel_referer),
+                as_cover=True,
+            )
+            if cover_url
+            else None
+        )
         has_cover = False
         cover_filename = "cover.jpg"
-        if cover_bytes:
-            cover_ext, _ = image_type(cover_bytes, os.path.splitext(urlparse(cover_url).path)[1])
-            cover_filename = f"cover{cover_ext}"
+        if cover_resolved:
+            cover_bytes, cover_filename = cover_resolved
             book.set_cover(cover_filename, cover_bytes)
             has_cover = True
+            embedded_files.add(cover_filename)
 
         # CSS
         default_css = css_text or (
@@ -262,14 +454,11 @@ class EpubBuilder:
 
         spine: List = ["nav"]
         toc: List = []
-        image_cache: Dict[str, str] = {}
-        img_index = 1
 
         def add_images_and_rewrite(html_str: str, epi_no: str, episode_cookies: dict) -> Tuple[str, List[epub.EpubItem]]:
-            nonlocal img_index
             soup = BeautifulSoup(html_str, "html.parser")
             added_items: List[epub.EpubItem] = []
-            
+
             # Construct the exact URL a real user would be on when reading this chapter (Fixed structure)
             viewer_url = f"https://global.novelpia.com/viewer/{epi_no}" if epi_no else "https://global.novelpia.com/"
 
@@ -278,31 +467,37 @@ class EpubBuilder:
                 if not src:
                     continue
                 src = normalize_url(src)
-                if src in image_cache:
-                    img["src"] = image_cache[src]
+                resolved = image_store.resolve(
+                    src,
+                    lambda src=src: self._fetch_bytes(
+                        client,
+                        src,
+                        viewer_url,
+                        episode_cookies,
+                        episode_no=int(epi_no),
+                    ),
+                )
+                if not resolved:
+                    img.decompose()
+                    continue
+
+                img_bytes, fname = resolved
+                img["src"] = fname
+                if fname in embedded_files:
                     continue
 
                 path = urlparse(src).path
                 fallback_ext = os.path.splitext(path)[1].lower() or ".jpg"
-                img_bytes = fetch_cached_image(
-                    src,
-                    referer_url=viewer_url,
-                    episode_cookies=episode_cookies,
-                    episode_no=int(epi_no),
+                _, media_type = image_type(img_bytes, fallback_ext)
+                digest = image_digest(img_bytes)
+                item = epub.EpubItem(
+                    uid=f"img-{digest}",
+                    file_name=fname,
+                    media_type=media_type,
+                    content=img_bytes,
                 )
-                if not img_bytes:
-                    img.decompose()
-                    continue
-
-                ext, media_type = image_type(img_bytes, fallback_ext)
-
-                fname = f"images/img_{img_index:05d}{ext}"
-                image_cache[src] = fname
-                item = epub.EpubItem(uid=f"img{img_index}", file_name=fname,
-                                     media_type=media_type, content=img_bytes)
-                img_index += 1
+                embedded_files.add(fname)
                 added_items.append(item)
-                img["src"] = fname
 
             return str(soup), added_items
 
@@ -314,7 +509,7 @@ class EpubBuilder:
         for idx_offset, ep in enumerate(episodes):
             epi_no = int(ep["episode_no"])
             cache_file = os.path.join(cache_dir, f"{epi_no}.json") if update_mode else None
-            
+
             cached_data = None
             if update_mode and cache_file and os.path.exists(cache_file):
                 try:
@@ -322,7 +517,7 @@ class EpubBuilder:
                         cached_data = json.load(f)
                 except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
                     logger.warning(f"[warn] Ignoring invalid episode cache {cache_file}: {exc}")
-            
+
             try:
                 cache_is_valid = (
                     isinstance(cached_data, dict)
@@ -393,7 +588,7 @@ class EpubBuilder:
                 progress_cb=internal_progress_cb,
                 on_complete_cb=cache_result
             )
-            
+
             if pbar:
                 pbar.close()
 
@@ -421,10 +616,10 @@ class EpubBuilder:
             signed_key = res.get("signed_key", {})
             if not isinstance(signed_key, dict):
                 signed_key = {}
-            
+
             # Fetch the actual episode number out of the result or fallback gracefully
             current_epi_no = str(res.get("epi_no", episodes[i-1].get("episode_no", str(i))))
-            
+
             html_text, new_imgs = add_images_and_rewrite(html_text, epi_no=current_epi_no, episode_cookies=signed_key)
 
             html_content = f'''<html xmlns="http://www.w3.org/1999/xhtml">
@@ -490,4 +685,5 @@ class EpubBuilder:
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
+        image_store.commit()
         return out_path, title, len(episodes)
