@@ -189,8 +189,10 @@ def fetch_novel_and_episodes(client, novel_id, max_chapters=None):
         f"chapter={metadata.episode_count} status={metadata.status}"
     )
 
-    rows = metadata.episode_count or 1000
-    data_list = client.episode_list(novel_id, rows=rows)
+    if metadata.episode_count == 0:
+        raise ValueError(f"Novel {novel_id} has no downloadable episodes.")
+
+    data_list = client.episode_list(novel_id, rows=metadata.episode_count)
     if not isinstance(data_list, dict):
         raise ValueError(f"Novel {novel_id} returned an invalid episode response.")
     list_result = data_list.get("result") or {}
@@ -210,5 +212,8 @@ def fetch_novel_and_episodes(client, novel_id, max_chapters=None):
 
     if max_chapters:
         ep_list = ep_list[:int(max_chapters)]
+
+    if not ep_list:
+        raise ValueError(f"Novel {novel_id} has no downloadable episodes.")
 
     return data_novel, ep_list, metadata.title

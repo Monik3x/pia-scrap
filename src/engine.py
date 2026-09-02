@@ -223,6 +223,10 @@ class ScraperEngine:
                     warn_msg = f"Novel {novel_id} does not exist or has no metadata. Skipping."
                     self.update_status(f"[warn] {warn_msg}")
                     results_summary.append({"novel_id": novel_id, "status": "not_exist"})
+                elif isinstance(e, ValueError) and "has no downloadable episodes" in err_str:
+                    warn_msg = f"Novel {novel_id} has no downloadable episodes. Skipping."
+                    self.update_status(f"[warn] {warn_msg}")
+                    results_summary.append({"novel_id": novel_id, "status": "no_data"})
                 elif status_code == 404:
                     warn_msg = f"Novel {novel_id} returned 404. Skipping."
                     self.update_status(f"[warn] {warn_msg}")

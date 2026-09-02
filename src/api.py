@@ -162,6 +162,8 @@ class NovelpiaClient:
             max_retries=1,
             cancel_event=self.cancel_event
         )
+        if _response_indicates_missing_episodes(r):
+            raise ValueError(f"Novel {novel_id} has no downloadable episodes.")
         r.raise_for_status()
         return r.json()
     
@@ -499,17 +501,17 @@ def _response_requires_auth(response) -> bool:
     )
 
 
-def _response_indicates_missing_novel(response) -> bool:
-    """Return whether a server error is Novelpia's missing-novel response."""
-    if response.status_code != 500:
-        return False
+def _server_error_messages(response) -> Optional[Dict[str, Any]]:
+    """Parse a Novelpia 500 body into messages and result fields, if present."""
+    if getattr(response, "status_code", None) != 500:
+        return None
 
     try:
         body = response.json()
     except (AttributeError, TypeError, ValueError):
-        return False
+        return None
     if not isinstance(body, dict):
-        return False
+        return None
 
     result = body.get("result")
     if not isinstance(result, dict):
@@ -523,14 +525,45 @@ def _response_indicates_missing_novel(response) -> bool:
     if isinstance(errmsgs, list):
         messages.extend(value for value in errmsgs if isinstance(value, str))
 
+    return {"body": body, "result": result, "messages": messages}
+
+
+def _response_indicates_missing_novel(response) -> bool:
+    """Return whether a server error is Novelpia's missing-novel response."""
+    parsed = _server_error_messages(response)
+    if not parsed:
+        return False
+
+    body = parsed["body"]
+    result = parsed["result"]
     has_missing_message = any(
         message.strip().casefold().rstrip(".") == "the novel does not exist"
-        for message in messages
+        for message in parsed["messages"]
     )
     has_novel_error_marker = (
         str(result.get("name", "")).casefold() == "novel_error"
         or str(body.get("code", "")) == "0001"
         or str(result.get("code", "")) == "0001"
+    )
+    return has_missing_message and has_novel_error_marker
+
+
+def _response_indicates_missing_episodes(response) -> bool:
+    """Return whether a server error means the novel has no episodes to list."""
+    parsed = _server_error_messages(response)
+    if not parsed:
+        return False
+
+    body = parsed["body"]
+    result = parsed["result"]
+    has_missing_message = any(
+        message.strip().casefold().rstrip(".") == "the episode does not exist"
+        for message in parsed["messages"]
+    )
+    has_novel_error_marker = (
+        str(result.get("name", "")).casefold() == "novel_error"
+        or str(body.get("code", "")) == "0002"
+        or str(result.get("code", "")) == "0002"
     )
     return has_missing_message and has_novel_error_marker
 
