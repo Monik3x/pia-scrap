@@ -48,7 +48,7 @@ python main.py NOVEL_ID [--user EMAIL] [--pass PASSWORD]
 | `--max-chapters` | Fetch up to N episodes (`0` or unset = all) |
 | `--lang` | EPUB language code (default: `en`) |
 | `--proxy` | HTTP/HTTPS proxy, e.g. `http://host:port` |
-| `--throttle` | Seconds to wait between episode/ticket/content calls (default: `2.0`; `0` disables the delay) |
+| `--throttle` | Seconds to wait between episode/ticket/content calls (default: `1.5`; `0` disables the delay) |
 | `--debug` | Verbose diagnostics and request failure logs |
 | `--txt` | Export as `.txt` per episode instead of EPUB |
 | `--update` | Reuse the local episode cache to skip unchanged chapters. EPUB also reuses images from the existing book. | 

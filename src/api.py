@@ -3,9 +3,9 @@ import time
 import uuid
 import logging
 import threading
+import re
 from curl_cffi import requests
 import concurrent.futures
-import re as _re
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Callable
@@ -476,7 +476,7 @@ class NovelpiaClient:
         parts = []
         if isinstance(data_block, dict):
             def content_order(k: str):
-                match = _re.search(r"(\d+)$", k)
+                match = re.search(r"(\d+)$", k)
                 return (0 if k == "epi_content" else 1, int(match.group(1)) if match else 0)
 
             content_keys = [key for key in data_block if str(key).startswith("epi_content")]

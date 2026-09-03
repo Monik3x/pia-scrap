@@ -2,10 +2,10 @@ import logging
 import os
 import threading
 from typing import List, Optional, Callable, Dict, Any
-from src.api import NovelUnavailableError, NovelpiaClient
+from src.api import NovelpiaClient
 from src.builder import build_epub, build_txt
 from src.helper import build_book_directory_index, load_config, save_config, parse_range
-from src.novel import NoEpisodesError, NoMetadataError, NovelSkipError
+from src.novel import NovelSkipError
 
 logger = logging.getLogger("pia_scrap")
 
@@ -44,10 +44,10 @@ class ScraperEngine:
         if self.threads < 1:
             raise ValueError("Threads must be at least 1.")
 
-        if self.debug_mode:
-            logging.getLogger("pia_scrap").setLevel(logging.DEBUG)
-        else:
-            logging.getLogger("pia_scrap").setLevel(logging.INFO)
+        # Skip if an entry point already set the level.
+        pia_logger = logging.getLogger("pia_scrap")
+        if pia_logger.level == logging.NOTSET:
+            pia_logger.setLevel(logging.DEBUG if self.debug_mode else logging.INFO)
         
         self.status_callback = status_callback
         self.progress_callback = progress_callback

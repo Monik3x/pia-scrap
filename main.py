@@ -86,12 +86,8 @@ def main():
     print(f"[info] Queue size: {len(target_ids)} novels")
 
     # Run the scraper loop
-    try:
-        results = engine.run_download_queue(target_ids)
-        sys.exit(0 if results["failed"] == 0 else 1)
-    except KeyboardInterrupt:
-        print("\n[warn] aborted by user")
-        sys.exit(130)
+    results = engine.run_download_queue(target_ids)
+    sys.exit(0 if results["failed"] == 0 else 1)
 
 if __name__ == "__main__":
     try:

@@ -6,7 +6,7 @@ from typing import Callable, Dict, List, Optional
 
 from bs4 import BeautifulSoup
 from tqdm import tqdm
-from src.const import EPISODE_REVISION_FIELD
+from src.const import BASE_URL, EPISODE_REVISION_FIELD
 from src.epub import EpubBuilder
 from src.helper import book_output_paths, ensure_dir, sanitize_filename, write_json_atomic, write_text_atomic
 from src.novel import fetch_novel_and_episodes, parse_novel_metadata
@@ -307,7 +307,7 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
         novel_id=novel_id,
         update_mode=update_mode,
         output_paths=paths,
-        cancel_event=getattr(client, "cancel_event", None),
+        cancel_event=client.cancel_event,
     )
 
     if status_cb:
@@ -365,7 +365,7 @@ def build_metadata(book_dir, data_novel, novel_id, ep_list):
     metadata = parse_novel_metadata(data_novel, novel_id)
 
     meta = {
-        "url": f"https://global.novelpia.com/novel/{novel_id}",
+        "url": f"{BASE_URL}/novel/{novel_id}",
         "novel_id": metadata.novel_id,
         "title": metadata.title,
         "author": metadata.author,
@@ -384,7 +384,7 @@ def build_metadata(book_dir, data_novel, novel_id, ep_list):
             "idx": idx,
             "episode_no": epi_no,
             "title": epi_title,
-            "url": f"https://global.novelpia.com/viewer/{epi_no}",
+            "url": f"{BASE_URL}/viewer/{epi_no}",
             EPISODE_REVISION_FIELD: ep.get(EPISODE_REVISION_FIELD),
         }
         chapter_lines.append(json.dumps(rec, ensure_ascii=False))

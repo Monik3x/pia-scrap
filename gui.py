@@ -46,7 +46,7 @@ class PiaScrapGUI(ctk.CTk):
         self.worker_thread = None
         
         self.logger = logging.getLogger("pia_scrap")
-        self.logger.setLevel(logging.DEBUG)
+        self.logger.setLevel(logging.INFO)
         
         self.queue_handler = QueueLogHandler(self.gui_queue)
         self.queue_handler.setLevel(logging.DEBUG)
@@ -307,11 +307,7 @@ class PiaScrapGUI(ctk.CTk):
         elif value == "Local Library":
             self.tab_download.pack_forget()
             self.tab_library.pack(fill="both", expand=True)
-            self.refresh_library()
-
-    def refresh_library(self):
-        """Map legacy calls from downstream modules to full_scan_library."""
-        self.full_scan_library()
+            self.full_scan_library()
 
     def full_scan_library(self):
         """Scans the directories instantly on disk. Does NOT load JSON metadata yet."""
@@ -528,6 +524,7 @@ class PiaScrapGUI(ctk.CTk):
         debug_mode = self.debug_switch.get()
         
         const.HTTP_LOG = bool(debug_mode)
+        self.logger.setLevel(logging.DEBUG if debug_mode else logging.INFO)
         
         self.progress_bar.set(0)
         self.progress_label.configure(text="Progress: 0/0")
@@ -647,7 +644,7 @@ class PiaScrapGUI(ctk.CTk):
                 messagebox.showinfo("All completed", details)
         
         self._reset_ui()
-        self.refresh_library()
+        self.full_scan_library()
 
     def on_download_failed(self, err_msg: str):
         self.status_label.configure(text="Status: Thread Crashed!")

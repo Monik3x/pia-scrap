@@ -26,6 +26,12 @@ logger = logging.getLogger("pia_scrap")
 
 IMAGE_INDEX_VERSION = 1
 _COVER_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg"}
+_DEFAULT_EPUB_CSS = """
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial; line-height: 1.6; }
+h1, h2, h3 { page-break-after: avoid; }
+img { max-width: 100%; height: auto; }
+.epi-title { font-size: 1.4em; font-weight: 600; margin: 0 0 0.6em; }
+"""
 
 
 def image_digest(data: bytes) -> str:
@@ -313,14 +319,12 @@ class EpubBuilder:
         fetch_image: Callable[..., Optional[bytes]],
         filename_hint: Optional[str] = None,
         language: str = "en",
-        author_fallback: str = "Unknown",
-        css_text: Optional[str] = None,
         novel_id: Optional[int] = None,
         update_mode: bool = False,
         output_paths: Optional[BookOutputPaths] = None,
         cancel_event=None,
     ) -> Tuple[str, str, int]:
-        metadata = parse_novel_metadata(novel, novel_id, author_fallback)
+        metadata = parse_novel_metadata(novel, novel_id)
         novel_fields = metadata.novel
         title = metadata.title
         author = metadata.author
@@ -377,17 +381,12 @@ class EpubBuilder:
             has_cover = True
             embedded_files.add(cover_filename)
 
-        # CSS
-        default_css = css_text or (
-            """
-            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial; line-height: 1.6; }
-            h1, h2, h3 { page-break-after: avoid; }
-            img { max-width: 100%; height: auto; }
-            .epi-title { font-size: 1.4em; font-weight: 600; margin: 0 0 0.6em; }
-            """
+        style = epub.EpubItem(
+            uid="style",
+            file_name="style/main.css",
+            media_type="text/css",
+            content=_DEFAULT_EPUB_CSS.encode("utf-8"),
         )
-        style = epub.EpubItem(uid="style", file_name="style/main.css",
-                              media_type="text/css", content=default_css.encode("utf-8"))
         book.add_item(style)
 
         spine: List = ["nav"]
