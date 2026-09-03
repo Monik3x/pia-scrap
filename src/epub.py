@@ -7,23 +7,15 @@ import shutil
 import zipfile
 
 from typing import Callable, Dict, List, Optional, Tuple
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from ebooklib import epub
-from tqdm import tqdm
-from src.api import NovelpiaClient
-from src.const import (
-    BASE_URL,
-    EPISODE_REVISION_FIELD,
-    IMAGE_HOST_COOKIE_POLICY,
-    SIGNED_IMAGE_COOKIE_NAMES,
-)
+from src.const import BASE_URL
 from src.helper import (
     BookOutputPaths,
     book_output_paths,
     ensure_dir,
     image_type,
-    is_approved_image_url,
     normalize_url,
     write_json_atomic,
     write_text_atomic,
@@ -263,121 +255,71 @@ class EpubBuilder:
         self.out_dir = out_dir
         ensure_dir(out_dir)
 
-    def _fetch_bytes(
+    def _embed_chapter_images(
         self,
-        client: NovelpiaClient,
-        url: str,
-        referer_url: str,
-        episode_cookies: Optional[Dict] = None,
-        episode_no: Optional[int] = None,
-    ) -> Optional[bytes]:
-        url = normalize_url(url)
-        if not is_approved_image_url(url):
-            logger.warning(f"[warn] Blocked image URL outside approved Novelpia hosts: {url}")
-            return None
+        html_str: str,
+        epi_no: Optional[int],
+        episode_cookies: dict,
+        image_store: _EpubImageStore,
+        fetch_image: Callable[..., Optional[bytes]],
+        embedded_files: set,
+    ) -> Tuple[str, List[epub.EpubItem]]:
+        soup = BeautifulSoup(html_str, "html.parser")
+        added_items: List[epub.EpubItem] = []
+        viewer_url = f"{BASE_URL}/viewer/{epi_no}" if epi_no else f"{BASE_URL}/"
 
-        last_error = "Unknown Error"
-        refreshed_signed_key = False
-        max_attempts = 3
-        attempt = 1
-        while attempt <= max_attempts:
-            cancel_event = getattr(client, "cancel_event", None)
-            if cancel_event and cancel_event.is_set():
-                raise RuntimeError("Image download cancelled by user.")
-            try:
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-                    "Referer": referer_url,
-                    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-                    "Sec-Fetch-Dest": "image",
-                    "Sec-Fetch-Mode": "no-cors",
-                    "Sec-Fetch-Site": "cross-site",
-                }
-                
-                host = urlparse(url).hostname.lower()
-                cookie_policy = IMAGE_HOST_COOKIE_POLICY[host]
-                cookie_dict = {}
-                if cookie_policy == "signed" and isinstance(episode_cookies, dict):
-                    cookie_dict = {
-                        key: value for key, value in episode_cookies.items()
-                        if key in SIGNED_IMAGE_COOKIE_NAMES and value
-                    }
-                elif cookie_policy == "session":
-                    for key in ("USERKEY", "TKEY"):
-                        try:
-                            value = client.s.cookies.get(key)
-                        except Exception:
-                            value = None
-                        if value:
-                            cookie_dict[key] = value
+        for img in soup.find_all("img"):
+            src = img.get("src")
+            if not src:
+                continue
+            src = normalize_url(src)
+            resolved = image_store.resolve(
+                src,
+                lambda src=src: fetch_image(
+                    src,
+                    viewer_url,
+                    episode_cookies,
+                    episode_no=epi_no,
+                ),
+            )
+            if not resolved:
+                img.decompose()
+                continue
 
-                # An explicit header prevents the session's broad .novelpia.com
-                # cookie jar from adding authentication cookies to CDN requests.
-                headers["Cookie"] = "; ".join(f"{key}={value}" for key, value in cookie_dict.items())
+            img_bytes, fname = resolved
+            img["src"] = fname
+            if fname in embedded_files:
+                continue
 
-                resp = client.s.get(
-                    url, headers=headers, timeout=client.timeout, allow_redirects=False
-                )
+            path = urlparse(src).path
+            fallback_ext = os.path.splitext(path)[1].lower() or ".jpg"
+            _, media_type = image_type(img_bytes, fallback_ext)
+            digest = image_digest(img_bytes)
+            item = epub.EpubItem(
+                uid=f"img-{digest}",
+                file_name=fname,
+                media_type=media_type,
+                content=img_bytes,
+            )
+            embedded_files.add(fname)
+            added_items.append(item)
 
-                if resp.status_code in (301, 302, 303, 307, 308):
-                    redirect_url = urljoin(url, resp.headers.get("Location", ""))
-                    if not is_approved_image_url(redirect_url):
-                        last_error = f"Blocked redirect to unapproved host: {redirect_url}"
-                        break
-                    url = redirect_url
-                    attempt += 1
-                    continue
-                
-                if resp.status_code == 429:
-                    last_error = "HTTP 429 (Too Many Requests)"
-                    if attempt < max_attempts:
-                        client.sleep_cooperative(2.0 * attempt)
-                    attempt += 1
-                    continue
+        return str(soup), added_items
 
-                if (
-                    resp.status_code == 403
-                    and cookie_policy == "signed"
-                    and episode_no is not None
-                    and not refreshed_signed_key
-                ):
-                    refreshed_signed_key = True
-                    try:
-                        fresh_cookies = client.episode_signed_key(episode_no)
-                        if isinstance(episode_cookies, dict):
-                            episode_cookies.clear()
-                            episode_cookies.update(fresh_cookies)
-                        else:
-                            episode_cookies = fresh_cookies
-                        logger.info(
-                            f"renewed image authorization for episode {episode_no}"
-                        )
-                        max_attempts += 1
-                        attempt += 1
-                        continue
-                    except Exception as exc:
-                        last_error = (
-                            f"HTTP 403; could not renew image authorization: {exc}"
-                        )
-                    
-                resp.raise_for_status()
-                return resp.content
-                
-            except Exception as e:
-                last_error = f"HTTP Error or Timeout: {e}"
-                if attempt < max_attempts:
-                    client.sleep_cooperative(1.0)
-            attempt += 1
-                
-        logger.warning(f"[warn] Image error ({last_error}): {url}")
-        return None
-
-    def build(self, client: NovelpiaClient, novel: Dict, episodes: List[Dict],
-              filename_hint: Optional[str] = None, language: str = "en",
-              author_fallback: str = "Unknown", css_text: Optional[str] = None,
-              novel_id: Optional[int] = None, update_mode: bool = False, threads: int = 1,
-              progress_cb: Optional[Callable[[int, int, str], None]] = None,
-              output_paths: Optional[BookOutputPaths] = None) -> Tuple[str, str, int]:
+    def build(
+        self,
+        novel: Dict,
+        chapters: List[Dict],
+        fetch_image: Callable[..., Optional[bytes]],
+        filename_hint: Optional[str] = None,
+        language: str = "en",
+        author_fallback: str = "Unknown",
+        css_text: Optional[str] = None,
+        novel_id: Optional[int] = None,
+        update_mode: bool = False,
+        output_paths: Optional[BookOutputPaths] = None,
+        cancel_event=None,
+    ) -> Tuple[str, str, int]:
         metadata = parse_novel_metadata(novel, novel_id, author_fallback)
         novel_fields = metadata.novel
         title = metadata.title
@@ -400,14 +342,10 @@ class EpubBuilder:
         if resolved_novel_id is not None:
             write_text_atomic(paths.novel_id_path, str(resolved_novel_id))
 
-        # --- Setup Cache Directory ---
-        cache_dir = paths.cache_dir
-        if update_mode:
-            ensure_dir(cache_dir)
         image_store = _EpubImageStore(
             paths,
             update_mode,
-            cancel_event=getattr(client, "cancel_event", None),
+            cancel_event=cancel_event,
         )
         embedded_files = set()
 
@@ -425,7 +363,7 @@ class EpubBuilder:
         cover_resolved = (
             image_store.resolve(
                 cover_url,
-                lambda: self._fetch_bytes(client, cover_url, novel_referer),
+                lambda: fetch_image(cover_url, novel_referer),
                 as_cover=True,
             )
             if cover_url
@@ -455,172 +393,26 @@ class EpubBuilder:
         spine: List = ["nav"]
         toc: List = []
 
-        def add_images_and_rewrite(html_str: str, epi_no: str, episode_cookies: dict) -> Tuple[str, List[epub.EpubItem]]:
-            soup = BeautifulSoup(html_str, "html.parser")
-            added_items: List[epub.EpubItem] = []
-
-            # Construct the exact URL a real user would be on when reading this chapter (Fixed structure)
-            viewer_url = f"https://global.novelpia.com/viewer/{epi_no}" if epi_no else "https://global.novelpia.com/"
-
-            for img in soup.find_all("img"):
-                src = img.get("src")
-                if not src:
-                    continue
-                src = normalize_url(src)
-                resolved = image_store.resolve(
-                    src,
-                    lambda src=src: self._fetch_bytes(
-                        client,
-                        src,
-                        viewer_url,
-                        episode_cookies,
-                        episode_no=int(epi_no),
-                    ),
-                )
-                if not resolved:
-                    img.decompose()
-                    continue
-
-                img_bytes, fname = resolved
-                img["src"] = fname
-                if fname in embedded_files:
-                    continue
-
-                path = urlparse(src).path
-                fallback_ext = os.path.splitext(path)[1].lower() or ".jpg"
-                _, media_type = image_type(img_bytes, fallback_ext)
-                digest = image_digest(img_bytes)
-                item = epub.EpubItem(
-                    uid=f"img-{digest}",
-                    file_name=fname,
-                    media_type=media_type,
-                    content=img_bytes,
-                )
-                embedded_files.add(fname)
-                added_items.append(item)
-
-            return str(soup), added_items
-
-        # --- Cache Filter ---
-        all_results = [None] * len(episodes)
-        to_fetch = []
-        fetch_indices = []
-
-        for idx_offset, ep in enumerate(episodes):
-            epi_no = int(ep["episode_no"])
-            cache_file = os.path.join(cache_dir, f"{epi_no}.json") if update_mode else None
-
-            cached_data = None
-            if update_mode and cache_file and os.path.exists(cache_file):
-                try:
-                    with open(cache_file, "r", encoding="utf-8") as f:
-                        cached_data = json.load(f)
-                except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                    logger.warning(f"[warn] Ignoring invalid episode cache {cache_file}: {exc}")
-
-            try:
-                cache_is_valid = (
-                    isinstance(cached_data, dict)
-                    and isinstance(cached_data.get("html"), str)
-                    and int(cached_data.get("epi_no")) == epi_no
-                    and EPISODE_REVISION_FIELD in cached_data
-                    and EPISODE_REVISION_FIELD in ep
-                    and ep[EPISODE_REVISION_FIELD] is not None
-                    and cached_data[EPISODE_REVISION_FIELD] == ep[EPISODE_REVISION_FIELD]
-                )
-            except (TypeError, ValueError):
-                cache_is_valid = False
-
-            if cache_is_valid:
-                cached_result = dict(cached_data)
-                cached_result.pop("signed_key", None)
-                all_results[idx_offset] = cached_result
-                epi_title = ep.get("epi_title") or f"Episode {ep.get('epi_num', idx_offset+1)}"
-                logger.info(f"loaded cached episode {ep.get('epi_num', idx_offset+1)} - {epi_title}")
-            else:
-                to_fetch.append(ep)
-                fetch_indices.append(idx_offset)
-
-        # Let the user know the cache worked!
-        cached_count = len(episodes) - len(to_fetch)
-        if cached_count > 0:
-            logger.info(f"Successfully loaded {cached_count} chapters instantly from local cache.")
-            if progress_cb:
-                progress_cb(cached_count, len(episodes), "Loaded from cache")
-
-        # Callback to write cache instantly when a thread returns
-        episode_revisions = {
-            int(ep["episode_no"]): ep.get(EPISODE_REVISION_FIELD) for ep in episodes
-        }
-
-        def cache_result(res):
-            if update_mode and res and "error" not in res:
-                epi_no = res.get("epi_no")
-                if epi_no:
-                    c_file = os.path.join(cache_dir, f"{epi_no}.json")
-                    try:
-                        cache_record = dict(res)
-                        cache_record.pop("signed_key", None)
-                        cache_record[EPISODE_REVISION_FIELD] = episode_revisions[int(epi_no)]
-                        write_json_atomic(c_file, cache_record)
-                    except (OSError, TypeError, ValueError) as exc:
-                        logger.warning(f"[warn] Could not cache episode {epi_no}: {exc}")
-
-        # --- Parallel Fetching ---
-        if to_fetch:
-            pbar = None
-            if not progress_cb:
-                # Setup a default CLI tqdm progress bar if no GUI callback is registered
-                pbar = tqdm(total=len(to_fetch), desc="Fetching chapters", unit="chap")
-
-            completed_count = 0
-
-            def internal_progress_cb(curr, tot, label):
-                nonlocal completed_count
-                completed_count += 1
-                if pbar:
-                    pbar.update(1)
-                if progress_cb:
-                    progress_cb(cached_count + completed_count, len(episodes), label)
-
-            fetched = client.fetch_episodes_parallel(
-                to_fetch, max_workers=threads,
-                progress_cb=internal_progress_cb,
-                on_complete_cb=cache_result
-            )
-
-            if pbar:
-                pbar.close()
-
-            for i, res in enumerate(fetched):
-                orig_idx = fetch_indices[i]
-                all_results[orig_idx] = res
-        failures = []
-        for index, result in enumerate(all_results, 1):
-            if not result or "error" in result:
-                error = result.get("error") if result else "Unknown error"
-                failures.append(f"chapter {index}: {error}")
-        if failures:
-            details = "; ".join(failures[:3])
-            if len(failures) > 3:
-                details += f"; and {len(failures) - 3} more"
-            raise RuntimeError(
-                f"Failed to fetch {len(failures)} of {len(episodes)} chapters ({details}). "
-                "The existing EPUB was left unchanged."
-            )
-
-        # --- Processing Results ---
-        for i, res in enumerate(all_results, 1):
+        for i, res in enumerate(chapters, 1):
             html_text = html_from_episode_text(res["html"])
             epi_title = res["epi_title"]
             signed_key = res.get("signed_key", {})
             if not isinstance(signed_key, dict):
                 signed_key = {}
 
-            # Fetch the actual episode number out of the result or fallback gracefully
-            current_epi_no = str(res.get("epi_no", episodes[i-1].get("episode_no", str(i))))
+            try:
+                current_epi_no = int(res.get("epi_no"))
+            except (TypeError, ValueError):
+                current_epi_no = None
 
-            html_text, new_imgs = add_images_and_rewrite(html_text, epi_no=current_epi_no, episode_cookies=signed_key)
+            html_text, new_imgs = self._embed_chapter_images(
+                html_text,
+                epi_no=current_epi_no,
+                episode_cookies=signed_key,
+                image_store=image_store,
+                fetch_image=fetch_image,
+                embedded_files=embedded_files,
+            )
 
             html_content = f'''<html xmlns="http://www.w3.org/1999/xhtml">
             <head>
@@ -654,7 +446,7 @@ class EpubBuilder:
         if has_cover:
             meta_parts.append(f"<p><img src='{cover_filename}' alt='Cover' style='width:230px;max-width:90%;height:auto;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.15)'/></p>")
         meta_parts.append(f"<p><strong>Author:</strong> {html.escape(author)}</p>")
-        meta_parts.append(f"<p><strong>Chapters:</strong> {len(episodes)}</p>")
+        meta_parts.append(f"<p><strong>Chapters:</strong> {len(chapters)}</p>")
         meta_parts.append(f"<p><strong>Status:</strong> {html.escape(status)}</p>")
         if src_url:
             meta_parts.append(f"<p><strong>Source:</strong> <a href='{src_url}'>{src_url}</a></p>")
@@ -686,4 +478,4 @@ class EpubBuilder:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
         image_store.commit()
-        return out_path, title, len(episodes)
+        return out_path, title, len(chapters)

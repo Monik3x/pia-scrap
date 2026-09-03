@@ -25,7 +25,7 @@ def main():
     ap.add_argument(
         "--update",
         action="store_true",
-        help="EPUB only. Reuse the local cache to skip unchanged chapters. Ignored with --txt",
+        help="Reuse the local episode cache to skip unchanged chapters",
     )
     ap.add_argument("--threads", type=int, default=1, help="Number of workers sending requests (default: 1), recommended to leave as is")
     args = ap.parse_args()

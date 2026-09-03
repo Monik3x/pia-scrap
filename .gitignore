@@ -209,3 +209,7 @@ __marimo__/
 output/
 .api.json
 src/__init__.py
+AGENTS.md
+pytest.ini
+tests/
+docs/

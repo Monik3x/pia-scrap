@@ -9,12 +9,15 @@ import re as _re
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Callable
+from urllib.parse import urljoin, urlparse
 from src import const
 from src.helper import (
     attach_auth_cookies,
     extract_t_token,
+    is_approved_image_url,
     load_config,
     merge_login_at,
+    normalize_url,
     save_config,
     unique_in_order,
 )
@@ -290,6 +293,117 @@ class NovelpiaClient:
         if not isinstance(signed_key, dict) or not signed_key:
             raise RuntimeError("Episode ticket did not contain signed image authorization.")
         return signed_key
+
+
+    def fetch_image(
+        self,
+        url: str,
+        referer_url: str,
+        episode_cookies: Optional[Dict] = None,
+        episode_no: Optional[int] = None,
+    ) -> Optional[bytes]:
+        """GET an image with CDN cookie policy, without leaking session auth cookies."""
+        url = normalize_url(url)
+        if not is_approved_image_url(url):
+            logger.warning(f"[warn] Blocked image URL outside approved Novelpia hosts: {url}")
+            return None
+
+        last_error = "Unknown Error"
+        refreshed_signed_key = False
+        max_attempts = 3
+        attempt = 1
+        while attempt <= max_attempts:
+            if self.cancel_event and self.cancel_event.is_set():
+                raise RuntimeError("Image download cancelled by user.")
+            try:
+                headers = dict(const.IMAGE_HEADERS)
+                headers["Referer"] = referer_url
+
+                host = urlparse(url).hostname.lower()
+                cookie_policy = const.IMAGE_HOST_COOKIE_POLICY[host]
+                cookie_dict = {}
+                if cookie_policy == "signed" and isinstance(episode_cookies, dict):
+                    cookie_dict = {
+                        key: value for key, value in episode_cookies.items()
+                        if key in const.SIGNED_IMAGE_COOKIE_NAMES and value
+                    }
+                elif cookie_policy == "session":
+                    for key in ("USERKEY", "TKEY"):
+                        try:
+                            value = self.s.cookies.get(key)
+                        except Exception:
+                            value = None
+                        if value:
+                            cookie_dict[key] = value
+
+                # An explicit header prevents the session's broad .novelpia.com
+                # cookie jar from adding authentication cookies to CDN requests.
+                headers["Cookie"] = "; ".join(
+                    f"{key}={value}" for key, value in cookie_dict.items()
+                )
+
+                resp = self.s.get(
+                    url, headers=headers, timeout=self.timeout, allow_redirects=False
+                )
+
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    redirect_url = urljoin(url, resp.headers.get("Location", ""))
+                    if not is_approved_image_url(redirect_url):
+                        last_error = f"Blocked redirect to unapproved host: {redirect_url}"
+                        break
+                    url = redirect_url
+                    attempt += 1
+                    continue
+
+                if resp.status_code == 429:
+                    last_error = "HTTP 429 (Too Many Requests)"
+                    if attempt < max_attempts:
+                        self.sleep_cooperative(2.0 * attempt)
+                    attempt += 1
+                    continue
+
+                if (
+                    resp.status_code == 403
+                    and cookie_policy == "signed"
+                    and episode_no is not None
+                    and not refreshed_signed_key
+                ):
+                    refreshed_signed_key = True
+                    try:
+                        fresh_cookies = self.episode_signed_key(episode_no)
+                        if isinstance(episode_cookies, dict):
+                            episode_cookies.clear()
+                            episode_cookies.update(fresh_cookies)
+                        else:
+                            episode_cookies = fresh_cookies
+                        logger.info(
+                            f"renewed image authorization for episode {episode_no}"
+                        )
+                        max_attempts += 1
+                        attempt += 1
+                        continue
+                    except Exception as exc:
+                        if self.cancel_event and self.cancel_event.is_set():
+                            raise
+                        last_error = (
+                            f"HTTP 403; could not renew image authorization: {exc}"
+                        )
+                        break
+
+                resp.raise_for_status()
+                return resp.content
+
+            except Exception as e:
+                if self.cancel_event and self.cancel_event.is_set():
+                    raise
+                last_error = f"HTTP Error or Timeout: {e}"
+                if attempt < max_attempts:
+                    self.sleep_cooperative(1.0)
+            attempt += 1
+
+        logger.warning(f"[warn] Image error ({last_error}): {url}")
+        return None
+
 
     def episode_content(self, token_t: str) -> Dict:
         url = f"{const.API_BASE}/v1/novel/episode/content"

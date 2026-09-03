@@ -83,6 +83,145 @@ def should_skip_epub_update(
     )
 
 
+def _cached_episode_result(cache_file: str, epi_no: int, episode: Dict) -> Optional[Dict]:
+    try:
+        with open(cache_file, "r", encoding="utf-8") as cache_handle:
+            cached_data = json.load(cache_handle)
+    except FileNotFoundError:
+        return None
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning(f"[warn] Ignoring invalid episode cache {cache_file}: {exc}")
+        return None
+
+    try:
+        cache_is_valid = (
+            isinstance(cached_data, dict)
+            and isinstance(cached_data.get("html"), str)
+            and int(cached_data.get("epi_no")) == epi_no
+            and EPISODE_REVISION_FIELD in cached_data
+            and EPISODE_REVISION_FIELD in episode
+            and episode[EPISODE_REVISION_FIELD] is not None
+            and cached_data[EPISODE_REVISION_FIELD] == episode[EPISODE_REVISION_FIELD]
+        )
+    except (TypeError, ValueError):
+        return None
+
+    if not cache_is_valid:
+        return None
+    cached_result = dict(cached_data)
+    cached_result.pop("signed_key", None)
+    return cached_result
+
+
+def _write_episode_cache(cache_file: str, result: Dict, revision) -> None:
+    epi_no = result.get("epi_no")
+    try:
+        cache_record = dict(result)
+        cache_record.pop("signed_key", None)
+        cache_record[EPISODE_REVISION_FIELD] = revision
+        write_json_atomic(cache_file, cache_record)
+    except (OSError, TypeError, ValueError) as exc:
+        logger.warning(f"[warn] Could not cache episode {epi_no}: {exc}")
+
+def _raise_chapter_fetch_failures(results: List[Optional[Dict]], unchanged_message: str) -> None:
+    failures = []
+    for index, result in enumerate(results, 1):
+        if not result or "error" in result:
+            error = result.get("error") if result else "Unknown error"
+            failures.append(f"chapter {index}: {error}")
+    if failures:
+        details = "; ".join(failures[:3])
+        if len(failures) > 3:
+            details += f"; and {len(failures) - 3} more"
+        raise RuntimeError(
+            f"Failed to fetch {len(failures)} of {len(results)} chapters ({details}). "
+            f"{unchanged_message}"
+        )
+
+
+def _load_or_fetch_episodes(
+    client,
+    episodes: List[Dict],
+    cache_dir: str,
+    update_mode: bool,
+    threads: int = 1,
+    progress_cb: Optional[Callable[[int, int, str], None]] = None,
+) -> List[Dict]:
+    """Return chapter payloads from .raw_cache and/or the network, in list order."""
+    all_results: List[Optional[Dict]] = [None] * len(episodes)
+    to_fetch = []
+    fetch_indices = []
+
+    for idx_offset, ep in enumerate(episodes):
+        epi_no = int(ep["episode_no"])
+        cached_result = None
+        if update_mode:
+            cached_result = _cached_episode_result(
+                os.path.join(cache_dir, f"{epi_no}.json"),
+                epi_no,
+                ep,
+            )
+        if cached_result is not None:
+            all_results[idx_offset] = cached_result
+            epi_title = ep.get("epi_title") or f"Episode {ep.get('epi_num', idx_offset+1)}"
+            logger.info(f"loaded cached episode {ep.get('epi_num', idx_offset+1)} - {epi_title}")
+        else:
+            to_fetch.append(ep)
+            fetch_indices.append(idx_offset)
+
+    cached_count = len(episodes) - len(to_fetch)
+    if cached_count > 0:
+        logger.info(f"Successfully loaded {cached_count} chapters instantly from local cache.")
+        if progress_cb:
+            progress_cb(cached_count, len(episodes), "Loaded from cache")
+
+    episode_revisions = {
+        int(ep["episode_no"]): ep.get(EPISODE_REVISION_FIELD) for ep in episodes
+    }
+
+    if to_fetch:
+        pbar = None
+        if not progress_cb:
+            pbar = tqdm(total=len(to_fetch), desc="Fetching chapters", unit="chap")
+
+        completed_count = 0
+
+        def internal_progress_cb(curr, tot, label):
+            nonlocal completed_count
+            completed_count += 1
+            if pbar:
+                pbar.update(1)
+            if progress_cb:
+                progress_cb(cached_count + completed_count, len(episodes), label)
+
+        def cache_fetched_episode(result):
+            if not result or "error" in result:
+                return
+            epi_no = result.get("epi_no")
+            if not epi_no:
+                return
+            _write_episode_cache(
+                os.path.join(cache_dir, f"{epi_no}.json"),
+                result,
+                episode_revisions[int(epi_no)],
+            )
+
+        fetched = client.fetch_episodes_parallel(
+            to_fetch, max_workers=threads,
+            progress_cb=internal_progress_cb,
+            on_complete_cb=cache_fetched_episode if update_mode else None,
+        )
+
+        if pbar:
+            pbar.close()
+
+        for i, res in enumerate(fetched):
+            orig_idx = fetch_indices[i]
+            all_results[orig_idx] = res
+
+    return all_results
+
+
 def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", update_mode=False, threads=1,
                progress_cb: Optional[Callable[[int, int, str], None]] = None,
                status_cb: Optional[Callable[[str], None]] = None,
@@ -148,18 +287,27 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
 
     if status_cb:
         status_cb("Downloading chapters and building EPUB...")
+    chapters = _load_or_fetch_episodes(
+        client,
+        ep_list,
+        paths.cache_dir,
+        update_mode,
+        threads=threads,
+        progress_cb=progress_cb,
+    )
+    _raise_chapter_fetch_failures(chapters, "The existing EPUB was left unchanged.")
+
     builder = EpubBuilder(out_dir)
     out_file, title, count = builder.build(
-        client=client,
-        threads=threads,
         novel=data_novel,
-        episodes=ep_list,
+        chapters=chapters,
+        fetch_image=client.fetch_image,
         filename_hint=title,
         language=language,
         novel_id=novel_id,
         update_mode=update_mode,
-        progress_cb=progress_cb,
         output_paths=paths,
+        cancel_event=getattr(client, "cancel_event", None),
     )
 
     if status_cb:
@@ -170,6 +318,7 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
     return out_file, title, count
 
 def build_txt(client, novel_id, out_dir, max_chapters=None, threads=1,
+              update_mode: bool = False,
               progress_cb: Optional[Callable[[int, int, str], None]] = None,
               status_cb: Optional[Callable[[str], None]] = None,
               book_index: Optional[Dict[int, str]] = None):
@@ -180,41 +329,17 @@ def build_txt(client, novel_id, out_dir, max_chapters=None, threads=1,
     paths = book_output_paths(out_dir, title, novel_id, book_index=book_index)
     book_dir = paths.book_dir
 
-    total = len(ep_list)
-    pbar = None
-    if not progress_cb:
-        pbar = tqdm(total=total, desc="Exporting TXT", unit="chap")
-
-    completed = 0
-    def internal_progress_cb(curr, tot, label):
-        nonlocal completed
-        completed += 1
-        if pbar:
-            pbar.update(1)
-        if progress_cb:
-            progress_cb(completed, total, label)
-
     if status_cb:
         status_cb("Downloading chapters...")
-    fetched_results = client.fetch_episodes_parallel(
-        ep_list, max_workers=threads, progress_cb=internal_progress_cb
+    fetched_results = _load_or_fetch_episodes(
+        client,
+        ep_list,
+        paths.cache_dir,
+        update_mode,
+        threads=threads,
+        progress_cb=progress_cb,
     )
-    if pbar:
-        pbar.close()
-
-    failures = []
-    for i, result in enumerate(fetched_results, 1):
-        if not result or "error" in result:
-            error = result.get("error") if result else "Unknown error"
-            failures.append(f"chapter {i}: {error}")
-    if failures:
-        details = "; ".join(failures[:3])
-        if len(failures) > 3:
-            details += f"; and {len(failures) - 3} more"
-        raise RuntimeError(
-            f"Failed to fetch {len(failures)} of {total} chapters ({details}). "
-            "No TXT files were written."
-        )
+    _raise_chapter_fetch_failures(fetched_results, "No TXT files were written.")
 
     ensure_dir(book_dir)
     if status_cb:

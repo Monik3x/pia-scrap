@@ -178,7 +178,6 @@ class PiaScrapGUI(ctk.CTk):
         self.update_switch = ctk.CTkSwitch(adv_frame, text="Update Mode (Use Cache)")
         self.update_switch.select()  # Enable by default
         self.update_switch.grid(row=6, column=0, columnspan=2, padx=10, pady=5, sticky="w")
-        format_switch.configure(command=self.on_format_changed)
         
         self.debug_switch = ctk.CTkSwitch(adv_frame, text="Verbose Debug Mode")
         self.debug_switch.grid(row=7, column=0, columnspan=2, padx=10, pady=(5, 10), sticky="w")
@@ -281,15 +280,6 @@ class PiaScrapGUI(ctk.CTk):
     def on_threads_warning(self, val):
         if int(val) > 1:
             self.append_to_log("[GUI-WARN] Choosing > 1 threads increases the risk of triggering Novelpia's strict IP rate-limits (HTTP 429). Leave at 1 for best results.")
-
-    def on_format_changed(self, value):
-        self._sync_update_switch_state()
-
-    def _sync_update_switch_state(self, inputs_enabled: bool = True):
-        if inputs_enabled and self.format_var.get() != "TXT":
-            self.update_switch.configure(state="normal")
-        else:
-            self.update_switch.configure(state="disabled")
 
     def import_from_env(self):
         load_dotenv(override=True)
@@ -425,7 +415,6 @@ class PiaScrapGUI(ctk.CTk):
             messagebox.showerror("Missing Novel ID", "This folder does not contain a valid Novel ID.")
             return
         self.format_var.set("EPUB")
-        self._sync_update_switch_state()
         self.ids_entry.delete(0, "end")
         self.ids_entry.insert(0, str(novel_id))
         self.update_switch.select()
@@ -456,7 +445,6 @@ class PiaScrapGUI(ctk.CTk):
             return
 
         self.format_var.set("EPUB")
-        self._sync_update_switch_state()
         self.ids_entry.delete(0, "end")
         self.ids_entry.insert(0, ", ".join(valid_ids))
         self.update_switch.select()
@@ -493,11 +481,8 @@ class PiaScrapGUI(ctk.CTk):
     def _set_input_states(self, enabled: bool):
         state = "normal" if enabled else "disabled"
         for widget in self.all_input_fields:
-            if widget is self.update_switch:
-                continue
             if hasattr(widget, "configure"):
                 widget.configure(state=state)
-        self._sync_update_switch_state(inputs_enabled=enabled)
 
     # ----------------------------
     # Thread Processing Loop
@@ -539,7 +524,7 @@ class PiaScrapGUI(ctk.CTk):
             return
             
         lang = self.lang_entry.get().strip() or "en"
-        update_mode = bool(self.update_switch.get()) and not txt_mode
+        update_mode = bool(self.update_switch.get())
         debug_mode = self.debug_switch.get()
         
         const.HTTP_LOG = bool(debug_mode)

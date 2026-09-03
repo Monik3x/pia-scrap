@@ -151,12 +151,6 @@ class ScraperEngine:
         if not self.client:
             raise RuntimeError("Client not initialized. Call initialize_client first.")
 
-        update_mode = self.update_mode and not self.txt_mode
-        if self.txt_mode and self.update_mode:
-            self.update_status(
-                "[warn] Update mode is EPUB-only and is ignored for TXT output."
-            )
-
         success_count = 0
         fail_count = 0
         skipped_count = 0
@@ -185,6 +179,7 @@ class ScraperEngine:
                         out_dir=self.out_dir,
                         max_chapters=(self.max_chapters if self.max_chapters > 0 else None),
                         threads=self.threads,
+                        update_mode=self.update_mode,
                         progress_cb=self.update_progress,
                         status_cb=self.update_status,
                         book_index=book_index,
@@ -200,7 +195,7 @@ class ScraperEngine:
                         out_dir=self.out_dir,
                         max_chapters=(self.max_chapters if self.max_chapters > 0 else None),
                         language=self.language,
-                        update_mode=update_mode,
+                        update_mode=self.update_mode,
                         threads=self.threads,
                         progress_cb=self.update_progress,
                         status_cb=self.update_status,

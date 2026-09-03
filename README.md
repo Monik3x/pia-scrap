@@ -51,7 +51,7 @@ python main.py NOVEL_ID [--user EMAIL] [--pass PASSWORD]
 | `--throttle` | Seconds to wait between episode/ticket/content calls (default: `2.0`; `0` disables the delay) |
 | `--debug` | Verbose diagnostics and request failure logs |
 | `--txt` | Export as `.txt` per episode instead of EPUB |
-| `--update` | EPUB only. Reuse the local cache to skip unchanged chapters when updating an existing book. Ignored with `--txt` | 
+| `--update` | Reuse the local episode cache to skip unchanged chapters. EPUB also reuses images from the existing book. | 
 | `--threads` | Number of workers sending requests, recommended to leave as is (default: `1`) |
 
 ---
