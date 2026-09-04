@@ -389,6 +389,27 @@ def book_output_paths(
         image_index_path=os.path.join(cache_dir, "image_index.json"),
     )
 
+
+def ensure_book_identity(paths: BookOutputPaths) -> None:
+    """Write .novel_id before cache or EPUB files so a cancelled run still owns this folder."""
+    novel_id = paths.novel_id
+    if novel_id is None:
+        return
+    try:
+        novel_id = int(novel_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Novel ID must be a positive integer.") from exc
+    if novel_id <= 0:
+        raise ValueError("Novel ID must be a positive integer.")
+
+    existing = book_directory_novel_id(paths.book_dir)
+    if existing is not None and existing != novel_id:
+        raise ValueError(
+            f"Book directory '{paths.book_dir}' belongs to novel ID {existing}."
+        )
+    write_text_atomic(paths.novel_id_path, str(novel_id))
+
+
 def unique_in_order(values: List[int]) -> List[int]:
     seen = set()
     unique = []

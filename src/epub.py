@@ -15,11 +15,11 @@ from src.const import BASE_URL
 from src.helper import (
     BookOutputPaths,
     book_output_paths,
+    ensure_book_identity,
     ensure_dir,
     image_type,
     normalize_url,
     write_json_atomic,
-    write_text_atomic,
 )
 from src.novel import NovelMetadata
 
@@ -339,8 +339,7 @@ class EpubBuilder:
             paths = book_output_paths(self.out_dir, filename_hint or title, resolved_novel_id)
         book_dir = paths.book_dir
         ensure_dir(book_dir)
-        if resolved_novel_id is not None:
-            write_text_atomic(paths.novel_id_path, str(resolved_novel_id))
+        ensure_book_identity(paths)
 
         image_store = _EpubImageStore(
             paths,

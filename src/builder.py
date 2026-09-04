@@ -7,7 +7,14 @@ from typing import Callable, Dict, List, Optional
 from bs4 import BeautifulSoup
 from src.const import BASE_URL, EPISODE_REVISION_FIELD
 from src.epub import EpubBuilder
-from src.helper import book_output_paths, ensure_dir, sanitize_filename, write_json_atomic, write_text_atomic
+from src.helper import (
+    book_output_paths,
+    ensure_book_identity,
+    ensure_dir,
+    sanitize_filename,
+    write_json_atomic,
+    write_text_atomic,
+)
 from src.novel import NovelMetadata, fetch_novel_and_episodes, html_from_episode_text, parse_novel_metadata
 
 logger = logging.getLogger("pia_scrap")
@@ -228,6 +235,7 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
     book_dir = paths.book_dir
 
     if update_mode:
+        ensure_book_identity(paths)
         meta_path = paths.metadata_path
         epub_path = paths.epub_path
         existing_chapters = None
@@ -324,6 +332,8 @@ def build_txt(client, novel_id, out_dir, max_chapters=None, threads=1,
 
     paths = book_output_paths(out_dir, title, novel_id, book_index=book_index)
     book_dir = paths.book_dir
+    if update_mode:
+        ensure_book_identity(paths)
 
     if status_cb:
         status_cb("Downloading chapters...")
