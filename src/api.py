@@ -21,13 +21,10 @@ from src.helper import (
     save_config,
     unique_in_order,
 )
-from src.novel import NoEpisodesError, NovelSkipError, html_from_episode_text
+from src.novel import NoEpisodesError, NovelSkipError
 
 logger = logging.getLogger("pia_scrap")
 
-# ----------------------------
-# API Client
-# ----------------------------
 
 class DownloadCancelled(RuntimeError):
     """The active download was cancelled by the user."""
@@ -59,7 +56,7 @@ class NovelpiaClient:
         self.email = email
         self.password = password
         self.cancel_event = cancel_event
-        # To avoid duplicate refreshes later on possible expiration mid process
+        # Serialize refresh and login so concurrent workers cannot renew tokens twice.
         self._auth_lock = threading.RLock() 
         self.throttle = max(0.0, float(1.5 if throttle is None else throttle))
         try:
@@ -74,7 +71,6 @@ class NovelpiaClient:
             logger.error(f"Error setting cookies: {e}")
 
     def sleep_cooperative(self, seconds: float) -> None:
-        """Sleep until the delay expires or cancellation is requested."""
         _wait_for_retry(seconds, self.cancel_event, "wait")
 
     def login(self) -> Optional[str]:
@@ -118,7 +114,7 @@ class NovelpiaClient:
 
     def _on_rate_limit(self):
         old = self.throttle
-        self.throttle = min(5.0, self.throttle + 0.5) # Reduced harsh penalty
+        self.throttle = min(5.0, self.throttle + 0.5)
         if const.HTTP_LOG:
             logger.warning(f"[api] Increased throttle from {old}s to {self.throttle}s due to rate limit.")
 
@@ -134,7 +130,6 @@ class NovelpiaClient:
         max_retries: int = 3,
         allow_refresh: bool = True,
     ):
-        """Authenticated JSON API call with shared refresh, login, and rate-limit recovery."""
         request_headers = headers
         if request_headers is None:
             request_headers = merge_login_at({}, self.tokens.login_at)
@@ -190,7 +185,6 @@ class NovelpiaClient:
         return r.json()
     
     def my_library(self) -> List[int]:
-        """Fetches the user's bookmarked novels from their library."""
         url = f"{const.API_BASE}/v1/novel/like/list"
         novel_ids = []
         page = 1
@@ -222,7 +216,6 @@ class NovelpiaClient:
                     novel_ids.append(int(novel_no))
                     
             if len(items) < 100:
-                # we've hit the last page
                 break
                 
             page += 1
@@ -231,7 +224,6 @@ class NovelpiaClient:
         return unique_in_order(novel_ids)
 
     def recent_novels(self, rows: int = 30) -> List[int]:
-        """Fetch recent public K-Premium novel IDs, newest first."""
         if rows < 1:
             raise ValueError("rows must be at least 1")
 
@@ -474,7 +466,7 @@ class NovelpiaClient:
                 }
 
             return {
-                "html": html_from_episode_text(html_text),
+                "html": html_text,
                 "epi_title": epi_title,
                 "epi_no": epi_no,
                 "signed_key": signed_key,

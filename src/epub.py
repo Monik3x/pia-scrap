@@ -21,7 +21,7 @@ from src.helper import (
     write_json_atomic,
     write_text_atomic,
 )
-from src.novel import html_from_episode_text, parse_novel_metadata
+from src.novel import NovelMetadata
 
 logger = logging.getLogger("pia_scrap")
 
@@ -253,9 +253,6 @@ class _EpubImageStore:
                 )
         _remove_legacy_image_cache(self.paths.image_cache_dir)
 
-# ----------------------------
-# EPUB Builder
-# ----------------------------
 
 class EpubBuilder:
     def __init__(self, out_dir: str):
@@ -315,17 +312,15 @@ class EpubBuilder:
 
     def build(
         self,
-        novel: Dict,
+        metadata: NovelMetadata,
         chapters: List[Dict],
         fetch_image: Callable[..., Optional[bytes]],
         filename_hint: Optional[str] = None,
         language: str = "en",
-        novel_id: Optional[int] = None,
         update_mode: bool = False,
         output_paths: Optional[BookOutputPaths] = None,
         cancel_event=None,
     ) -> Tuple[str, str, int]:
-        metadata = parse_novel_metadata(novel, novel_id)
         novel_fields = metadata.novel
         title = metadata.title
         author = metadata.author
@@ -360,7 +355,6 @@ class EpubBuilder:
         book.set_language(language)
         book.add_author(author)
 
-        # Cover
         cover_url = normalize_url(
             novel_fields.get("novel_full_img") or novel_fields.get("novel_img") or ""
         )
@@ -394,7 +388,7 @@ class EpubBuilder:
         toc: List = []
 
         for i, res in enumerate(chapters, 1):
-            html_text = html_from_episode_text(res["html"])
+            html_text = res["html"]
             epi_title = res["epi_title"]
             signed_key = res.get("signed_key", {})
             if not isinstance(signed_key, dict):
@@ -439,7 +433,6 @@ class EpubBuilder:
             for item in new_imgs:
                 book.add_item(item)
 
-        # About / metadata page
         src_url = f"{BASE_URL}/novel/{resolved_novel_id}" if resolved_novel_id else ""
         meta_parts = []
         meta_parts.append(f"<h1>{html.escape(title)}</h1>")
@@ -461,12 +454,10 @@ class EpubBuilder:
         spine.insert(1, about)
         toc.insert(0, about)
 
-        # TOC, NCX, Nav
         book.toc = toc
         book.add_item(epub.EpubNcx())
         book.add_item(epub.EpubNav())
 
-        # Spine & CSS
         book.spine = spine
 
         out_path = paths.epub_path

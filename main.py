@@ -5,9 +5,6 @@ from dotenv import load_dotenv
 from src.engine import ScraperEngine
 from src import const
 
-# ----------------------------
-# Main Function
-# ----------------------------
 
 def main():
     load_dotenv()
@@ -39,7 +36,6 @@ def main():
     if bool(args.email) != bool(args.password):
         ap.error("provide both --user and --pass, or neither to use stored tokens")
 
-    # Configure Logging based on debug mode
     log_level = logging.DEBUG if args.debug else logging.INFO
     logging.basicConfig(
         level=log_level,
@@ -64,7 +60,6 @@ def main():
         debug_mode=args.debug
     )
 
-    # Initialize client (reusing or saving tokens)
     try:
         if not engine.initialize_client():
             print("[error] No credentials or stored tokens found. Provide --user and --pass to login once.")
@@ -73,7 +68,6 @@ def main():
         print(f"[error] Failed client initialization: {e}")
         sys.exit(2)
 
-    # Resolve IDs from input queue, library, or recent public listings
     try:
         target_ids = engine.resolve_novel_ids(args.novel_ids)
         if not target_ids:
@@ -85,7 +79,6 @@ def main():
 
     print(f"[info] Queue size: {len(target_ids)} novels")
 
-    # Run the scraper loop
     results = engine.run_download_queue(target_ids)
     sys.exit(0 if results["failed"] == 0 else 1)
 

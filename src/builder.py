@@ -8,13 +8,10 @@ from bs4 import BeautifulSoup
 from src.const import BASE_URL, EPISODE_REVISION_FIELD
 from src.epub import EpubBuilder
 from src.helper import book_output_paths, ensure_dir, sanitize_filename, write_json_atomic, write_text_atomic
-from src.novel import fetch_novel_and_episodes, parse_novel_metadata
+from src.novel import NovelMetadata, fetch_novel_and_episodes, html_from_episode_text, parse_novel_metadata
 
 logger = logging.getLogger("pia_scrap")
 
-# ----------------------------
-# Main Build Function
-# ----------------------------
 
 def _epub_chapter_count(epub_path: str) -> int:
     """Return the number of generated chapter documents, or -1 if invalid."""
@@ -30,7 +27,6 @@ def _epub_chapter_count(epub_path: str) -> int:
 
 
 def _chapter_revisions_match(chapters_path: str, episodes: List[Dict]) -> bool:
-    """Return whether stored chapter revisions match the current episode list."""
     try:
         with open(chapters_path, "r", encoding="utf-8") as chapter_file:
             stored_chapters = [
@@ -187,8 +183,13 @@ def _load_or_fetch_episodes(
             if progress_cb:
                 progress_cb(cached_count + completed_count, len(episodes), label)
 
-        def cache_fetched_episode(result):
+        def finalize_fetched_episode(result):
             if not result or "error" in result:
+                return
+            html = result.get("html")
+            if isinstance(html, str):
+                result["html"] = html_from_episode_text(html)
+            if not update_mode:
                 return
             epi_no = result.get("epi_no")
             if not epi_no:
@@ -203,7 +204,7 @@ def _load_or_fetch_episodes(
             to_fetch,
             max_workers=threads,
             progress_cb=internal_progress_cb,
-            on_complete_cb=cache_fetched_episode if update_mode else None,
+            on_complete_cb=finalize_fetched_episode,
         )
 
         for i, res in enumerate(fetched):
@@ -219,7 +220,10 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
                book_index: Optional[Dict[int, str]] = None):
     if status_cb:
         status_cb("Fetching novel metadata and episode list...")
-    data_novel, ep_list, title = fetch_novel_and_episodes(client, novel_id, max_chapters=max_chapters)
+    data_novel, ep_list, metadata = fetch_novel_and_episodes(
+        client, novel_id, max_chapters=max_chapters
+    )
+    title = metadata.title
     paths = book_output_paths(out_dir, title, novel_id, book_index=book_index)
     book_dir = paths.book_dir
 
@@ -272,9 +276,10 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
                 status_cb(
                     "Fetching full episode list so update does not shrink the local book..."
                 )
-            data_novel, ep_list, title = fetch_novel_and_episodes(
+            data_novel, ep_list, metadata = fetch_novel_and_episodes(
                 client, novel_id, max_chapters=None
             )
+            title = metadata.title
 
     if status_cb:
         status_cb("Downloading chapters and building EPUB...")
@@ -290,12 +295,11 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
 
     builder = EpubBuilder(out_dir)
     out_file, title, count = builder.build(
-        novel=data_novel,
+        metadata=metadata,
         chapters=chapters,
         fetch_image=client.fetch_image,
         filename_hint=title,
         language=language,
-        novel_id=novel_id,
         update_mode=update_mode,
         output_paths=paths,
         cancel_event=client.cancel_event,
@@ -304,7 +308,7 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
     if status_cb:
         status_cb("Finalizing metadata...")
     ensure_dir(book_dir)
-    build_metadata(book_dir, data_novel, novel_id, ep_list)
+    build_metadata(book_dir, data_novel, novel_id, ep_list, metadata=metadata)
 
     return out_file, title, count
 
@@ -315,7 +319,8 @@ def build_txt(client, novel_id, out_dir, max_chapters=None, threads=1,
               book_index: Optional[Dict[int, str]] = None):
     if status_cb:
         status_cb("Fetching novel metadata and episode list...")
-    data_novel, ep_list, title = fetch_novel_and_episodes(client, novel_id, max_chapters)
+    data_novel, ep_list, metadata = fetch_novel_and_episodes(client, novel_id, max_chapters)
+    title = metadata.title
 
     paths = book_output_paths(out_dir, title, novel_id, book_index=book_index)
     book_dir = paths.book_dir
@@ -348,12 +353,19 @@ def build_txt(client, novel_id, out_dir, max_chapters=None, threads=1,
 
     if status_cb:
         status_cb("Writing metadata files...")
-    build_metadata(book_dir, data_novel, novel_id, ep_list)
+    build_metadata(book_dir, data_novel, novel_id, ep_list, metadata=metadata)
 
     return book_dir, title, len(fetched_results)
 
-def build_metadata(book_dir, data_novel, novel_id, ep_list):
-    metadata = parse_novel_metadata(data_novel, novel_id)
+def build_metadata(
+    book_dir,
+    data_novel,
+    novel_id,
+    ep_list,
+    metadata: Optional[NovelMetadata] = None,
+):
+    if metadata is None:
+        metadata = parse_novel_metadata(data_novel, novel_id)
 
     meta = {
         "url": f"{BASE_URL}/novel/{novel_id}",

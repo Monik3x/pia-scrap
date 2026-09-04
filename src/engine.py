@@ -71,7 +71,6 @@ class ScraperEngine:
                 logger.error(f"Error in progress callback: {e}")
 
     def initialize_client(self) -> bool:
-        """Initializes the NovelpiaClient and handles authentication."""
         self.update_status("Initializing client...")
         cfg = load_config()
         cfg_login_at = (cfg.get("login_at") or "").strip() or None
@@ -147,7 +146,6 @@ class ScraperEngine:
             return parse_range(novel_ids_input)
 
     def run_download_queue(self, target_ids: List[int]) -> Dict[str, Any]:
-        """Sequentially runs download tasks for the resolved novel IDs."""
         if not self.client:
             raise RuntimeError("Client not initialized. Call initialize_client first.")
 
@@ -161,7 +159,6 @@ class ScraperEngine:
         book_index = build_book_directory_index(self.out_dir)
 
         for idx, novel_id in enumerate(target_ids):
-            # Check for cancellation before processing the next novel
             if self.cancel_event and self.cancel_event.is_set():
                 self.update_status("[cancelled] Download queue cancelled by user.")
                 break

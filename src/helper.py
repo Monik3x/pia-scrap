@@ -6,7 +6,7 @@ import logging
 import tempfile
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import parse_qs, urljoin, urlparse
 from src.const import APPROVED_IMAGE_HOSTS, BASE_URL, CONFIG_PATH, IMG_BASE_HTTPS
 
@@ -48,9 +48,6 @@ class LocalBookInfo:
     chapter_count: Optional[int]
     has_metadata: bool
 
-# ----------------------------
-# Helpers
-# ----------------------------
 
 def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
@@ -195,21 +192,28 @@ def book_directory_novel_id(book_dir: str) -> Optional[int]:
         return None
 
 
-def _find_existing_book_base(out_dir: str, novel_id: int, preferred_base: str) -> Optional[str]:
-    """Locate an existing book by its stable ID, even after a remote rename."""
-    matches = []
-    try:
-        with os.scandir(out_dir) as iterator:
-            entries = sorted(iterator, key=lambda entry: entry.name.casefold())
-    except OSError:
-        return None
-
+def _iter_book_dir_entries(out_dir: str) -> Iterator[os.DirEntry]:
+    # Does not skip '.' names or catch scandir errors.
+    with os.scandir(out_dir) as iterator:
+        entries = sorted(iterator, key=lambda entry: entry.name.casefold())
     for entry in entries:
         try:
             if not entry.is_dir(follow_symlinks=False):
                 continue
         except OSError:
             continue
+        yield entry
+
+
+def _find_existing_book_base(out_dir: str, novel_id: int, preferred_base: str) -> Optional[str]:
+    """Locate an existing book by its stable ID, even after a remote rename."""
+    matches = []
+    try:
+        entries = list(_iter_book_dir_entries(out_dir))
+    except OSError:
+        return None
+
+    for entry in entries:
         if book_directory_novel_id(entry.path) == novel_id:
             if entry.name == preferred_base:
                 return entry.name
@@ -226,17 +230,11 @@ def build_book_directory_index(out_dir: str) -> Dict[int, str]:
     """Scan an output root once and map each known novel ID to a directory name."""
     index: Dict[int, str] = {}
     try:
-        with os.scandir(out_dir) as iterator:
-            entries = sorted(iterator, key=lambda entry: entry.name.casefold())
+        entries = list(_iter_book_dir_entries(out_dir))
     except OSError:
         return index
 
     for entry in entries:
-        try:
-            if not entry.is_dir(follow_symlinks=False):
-                continue
-        except OSError:
-            continue
         novel_id = book_directory_novel_id(entry.path)
         if novel_id is None:
             continue
@@ -251,11 +249,9 @@ def build_book_directory_index(out_dir: str) -> Dict[int, str]:
 
 
 def list_local_book_directories(out_dir: str) -> List[str]:
-    """Return sorted book folder names under an output root."""
     names: List[str] = []
     try:
-        with os.scandir(out_dir) as iterator:
-            entries = sorted(iterator, key=lambda entry: entry.name.casefold())
+        entries = list(_iter_book_dir_entries(out_dir))
     except FileNotFoundError:
         return names
     except OSError as exc:
@@ -265,17 +261,11 @@ def list_local_book_directories(out_dir: str) -> List[str]:
     for entry in entries:
         if entry.name.startswith("."):
             continue
-        try:
-            if not entry.is_dir(follow_symlinks=False):
-                continue
-        except OSError:
-            continue
         names.append(entry.name)
     return names
 
 
 def load_local_book_info(book_dir: str) -> LocalBookInfo:
-    """Load novel ID and listing fields from a local book folder."""
     book_dir = os.fspath(book_dir)
     directory_name = os.path.basename(os.path.normpath(book_dir)) or book_dir
     novel_id = book_directory_novel_id(book_dir)
@@ -316,7 +306,6 @@ def load_local_book_info(book_dir: str) -> LocalBookInfo:
 
 
 def local_library_novel_ids(out_dir: str) -> List[int]:
-    """Collect unique novel IDs from local book folders, marker first."""
     ids: List[int] = []
     for name in list_local_book_directories(out_dir):
         novel_id = book_directory_novel_id(os.path.join(out_dir, name))
@@ -335,8 +324,7 @@ def book_base(
     base = kebab(title, fallback=f"novel-{novel_id}")
     preferred_dir = os.path.join(out_dir, base)
 
-    # The overwhelmingly common case should require one directory check, not a
-    # scan of the entire library.
+    # Prefer one directory check over scanning the whole library.
     if os.path.isdir(preferred_dir) and book_directory_novel_id(preferred_dir) == novel_id:
         return base
 
@@ -428,12 +416,8 @@ def write_text_atomic(path, value: str) -> None:
             os.remove(temp_path)
 
 def write_json_atomic(path, value: Any, *, indent: Optional[int] = None) -> None:
-    """Serialize and atomically write a JSON value."""
     write_text_atomic(path, json.dumps(value, ensure_ascii=False, indent=indent))
 
-# ----------------------------
-# Config management
-# ----------------------------
 
 def load_config() -> Dict[str, Any]:
     try:
@@ -456,9 +440,6 @@ def save_config(cfg: Dict[str, Any]) -> bool:
         logger.error(f"Error occurred while saving config: {e}")
         return False
 
-# ----------------------------
-# Auth token management & header merging
-# ----------------------------
 
 def merge_login_at(headers: dict, login_at: Optional[str]) -> dict:
     h = dict(headers or {})
@@ -494,9 +475,6 @@ def attach_auth_cookies(session, headers=None):
 
     return headers
 
-# ----------------------------
-# Token extraction
-# ----------------------------
 
 def iter_strings(obj):
     if isinstance(obj, str):
@@ -517,7 +495,6 @@ def extract_t_token(tdata: dict) -> Optional[str]:
         res = {}
     fallback_token: Optional[str] = None
 
-    # 1) common keys at result
     for k in ("_t", "t", "token"):
         v = res.get(k)
         if isinstance(v, str) and v:
@@ -525,7 +502,6 @@ def extract_t_token(tdata: dict) -> Optional[str]:
                 return v
             fallback_token = fallback_token or v
 
-    # 2) nested dicts under result
     if isinstance(res, dict):
         for _, v in res.items():
             if isinstance(v, dict):
@@ -536,7 +512,6 @@ def extract_t_token(tdata: dict) -> Optional[str]:
                             return vv
                         fallback_token = fallback_token or vv
 
-    # 3) URL that is the official content endpoint with any _t
     for s in iter_strings(tdata):
         if isinstance(s, str) and (s.startswith("http://") or s.startswith("https://")):
             try:
@@ -553,9 +528,6 @@ def extract_t_token(tdata: dict) -> Optional[str]:
                 pass
     return fallback_token
 
-# ----------------------------
-# Advanced Range Parsing
-# ----------------------------
 
 def parse_range(range_str: str) -> List[int]:
     """Parses mixed strings like '100', '100-105', or '47,50,51-55' into a list of integers."""

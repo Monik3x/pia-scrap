@@ -14,8 +14,8 @@ from src.engine import ScraperEngine
 from src.helper import list_local_book_directories, load_config, load_local_book_info, local_library_novel_ids
 from src import const
 
-ctk.set_appearance_mode("System")  # Options: "System", "Dark", "Light"
-ctk.set_default_color_theme("blue") # Themes: "blue", "green", "dark-blue"
+ctk.set_appearance_mode("System")
+ctk.set_default_color_theme("blue")
 
 class QueueLogHandler(logging.Handler):
     def __init__(self, log_queue: queue.Queue):
@@ -29,9 +29,7 @@ class QueueLogHandler(logging.Handler):
         except Exception:
             self.handleError(record)
 
-# ----------------------------
-# Main GUI Window
-# ----------------------------
+
 class PiaScrapGUI(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -85,8 +83,8 @@ class PiaScrapGUI(ctk.CTk):
 
         self.current_page = 0
         self.items_per_page = 50
-        self.library_dirs = []       # Master sorted folder list
-        self.filtered_dirs = []      # Subset after search query is applied
+        self.library_dirs = []
+        self.filtered_dirs = []
         
         self._load_saved_configurations()
         
@@ -100,7 +98,6 @@ class PiaScrapGUI(ctk.CTk):
         title_lbl = ctk.CTkLabel(left_frame, text="Options", font=ctk.CTkFont(size=20, weight="bold"))
         title_lbl.grid(row=0, column=0, padx=15, pady=(15, 10), sticky="w")
         
-        # Authentication
         auth_frame = ctk.CTkFrame(left_frame, corner_radius=8)
         auth_frame.grid(row=1, column=0, padx=15, pady=5, sticky="ew")
         auth_frame.grid_columnconfigure(0, weight=1)
@@ -117,7 +114,6 @@ class PiaScrapGUI(ctk.CTk):
         self.load_env_btn = ctk.CTkButton(auth_frame, text="Import from .env", fg_color="#4A5568", hover_color="#2D3748", command=self.import_from_env)
         self.load_env_btn.grid(row=3, column=0, padx=10, pady=(5, 10), sticky="ew")
         
-        # Main Download Options 
         opts_frame = ctk.CTkFrame(left_frame, corner_radius=8)
         opts_frame.grid(row=2, column=0, padx=15, pady=5, sticky="ew")
         opts_frame.grid_columnconfigure(0, weight=1)
@@ -144,7 +140,6 @@ class PiaScrapGUI(ctk.CTk):
         )
         format_switch.grid(row=3, column=0, columnspan=2, padx=10, pady=(5, 10), sticky="ew")
         
-        # Advanced Scraper Config
         adv_frame = ctk.CTkFrame(left_frame, corner_radius=8)
         adv_frame.grid(row=3, column=0, padx=15, pady=5, sticky="ew")
         adv_frame.grid_columnconfigure((0, 1), weight=1)
@@ -177,13 +172,12 @@ class PiaScrapGUI(ctk.CTk):
         self.proxy_entry.grid(row=5, column=1, padx=10, pady=2, sticky="e")
         
         self.update_switch = ctk.CTkSwitch(adv_frame, text="Update Mode (Use Cache)")
-        self.update_switch.select()  # Enable by default
+        self.update_switch.select()
         self.update_switch.grid(row=6, column=0, columnspan=2, padx=10, pady=5, sticky="w")
         
         self.debug_switch = ctk.CTkSwitch(adv_frame, text="Verbose Debug Mode")
         self.debug_switch.grid(row=7, column=0, columnspan=2, padx=10, pady=(5, 10), sticky="w")
         
-        # Track entry widgets for bulk disable/enable
         self.all_input_fields = [
             self.email_entry, self.pass_entry, self.load_env_btn, self.ids_entry, self.output_entry,
             browse_btn, format_switch, self.max_chap_entry, self.throttle_entry,
@@ -225,7 +219,6 @@ class PiaScrapGUI(ctk.CTk):
         self.console_textbox.configure(state="disabled")
 
     def _create_library_panel(self):
-        """Creates the layout structure for the Local Library management component."""
         self.tab_library.grid_columnconfigure(0, weight=1)
         self.tab_library.grid_rowconfigure(1, weight=1)
         
@@ -239,7 +232,6 @@ class PiaScrapGUI(ctk.CTk):
         lib_title = ctk.CTkLabel(top_bar, text="Local Library", font=ctk.CTkFont(size=18, weight="bold"))
         lib_title.grid(row=0, column=0, sticky="w")
 
-        # Search input
         self.search_var = ctk.StringVar()
         self.search_var.trace_add("write", lambda *args: self.on_search_changed())
         self.search_entry = ctk.CTkEntry(top_bar, placeholder_text="🔍 Search local novels...", textvariable=self.search_var)
@@ -254,7 +246,6 @@ class PiaScrapGUI(ctk.CTk):
         self.library_scroll = ctk.CTkScrollableFrame(self.tab_library, label_text="Detected Local Novels")
         self.library_scroll.grid(row=1, column=0, padx=15, pady=(0, 10), sticky="nsew")
 
-        # Pagination controls
         self.pag_frame = ctk.CTkFrame(self.tab_library, fg_color="transparent")
         self.pag_frame.grid(row=2, column=0, padx=15, pady=(0, 15), sticky="ew")
         self.pag_frame.grid_columnconfigure((0, 2), weight=1)
@@ -269,9 +260,6 @@ class PiaScrapGUI(ctk.CTk):
         self.next_btn = ctk.CTkButton(self.pag_frame, text="Next ▶", width=100, command=self.next_page)
         self.next_btn.grid(row=0, column=2, sticky="e")
 
-    # ----------------------------
-    # Helpers & UI Interactions
-    # ----------------------------
     def browse_output_dir(self):
         dir_path = filedialog.askdirectory(initialdir=self.output_entry.get())
         if dir_path:
@@ -301,7 +289,6 @@ class PiaScrapGUI(ctk.CTk):
             messagebox.showwarning("Warning", "No credentials found inside .env file.")
 
     def on_nav_changed(self, value):
-        """Swaps view panels visibility seamlessly mimicking native top-left anchored tabs."""
         if value == "Downloader":
             self.tab_library.pack_forget()
             self.tab_download.pack(fill="both", expand=True)
@@ -311,13 +298,12 @@ class PiaScrapGUI(ctk.CTk):
             self.full_scan_library()
 
     def full_scan_library(self):
-        """Scans the directories instantly on disk. Does NOT load JSON metadata yet."""
+        """List book folders without reading metadata.json."""
         out_dir = self.output_entry.get().strip() or "output"
         self.library_dirs = list_local_book_directories(out_dir)
         self.on_search_changed()
 
     def on_search_changed(self):
-        """Filters the master list based on the search input query."""
         query = self.search_var.get().strip().lower()
         if not query:
             self.filtered_dirs = self.library_dirs
@@ -328,7 +314,7 @@ class PiaScrapGUI(ctk.CTk):
         self.display_current_page()
 
     def display_current_page(self):
-        """Renders only the current page of filtered items, reading JSON lazily."""
+        """Load metadata.json only for the visible page."""
         for widget in self.library_scroll.winfo_children():
             widget.destroy()
             
@@ -349,7 +335,6 @@ class PiaScrapGUI(ctk.CTk):
         end_idx = min(start_idx + self.items_per_page, total_items)
         page_slice = self.filtered_dirs[start_idx:end_idx]
 
-        # Update button states and total label
         self.pag_label.configure(text=f"Page {self.current_page + 1} of {total_pages} (Novels {start_idx + 1}-{end_idx} of {total_items})")
         self.prev_btn.configure(state="normal" if self.current_page > 0 else "disabled")
         self.next_btn.configure(state="normal" if self.current_page < total_pages - 1 else "disabled")
@@ -364,14 +349,13 @@ class PiaScrapGUI(ctk.CTk):
             status = info.status
             novel_id = info.novel_id
             
-            # Row layout container
             row = ctk.CTkFrame(self.library_scroll, corner_radius=6)
             row.pack(fill="x", padx=5, pady=4)
             
-            row.grid_columnconfigure(0, weight=4, uniform="lib_cols") # Title Card Area
-            row.grid_columnconfigure(1, weight=2, uniform="lib_cols") # Local Chapters Count
-            row.grid_columnconfigure(2, weight=2, uniform="lib_cols") # Status flag
-            row.grid_columnconfigure(3, weight=2, uniform="lib_cols") # Quick actions
+            row.grid_columnconfigure(0, weight=4, uniform="lib_cols")
+            row.grid_columnconfigure(1, weight=2, uniform="lib_cols")
+            row.grid_columnconfigure(2, weight=2, uniform="lib_cols")
+            row.grid_columnconfigure(3, weight=2, uniform="lib_cols")
             
             info_lbl = ctk.CTkLabel(row, text=f"{title}\nBy: {author}", font=ctk.CTkFont(size=13, weight="bold"), anchor="w", justify="left")
             info_lbl.grid(row=0, column=0, padx=15, pady=10, sticky="w")
@@ -407,7 +391,6 @@ class PiaScrapGUI(ctk.CTk):
             self.display_current_page()
 
     def trigger_library_update(self, novel_id):
-        """Pushes target data back to download parameters tab and automatically starts processing updates."""
         if not novel_id:
             messagebox.showerror("Missing Novel ID", "This folder does not contain a valid Novel ID.")
             return
@@ -416,13 +399,11 @@ class PiaScrapGUI(ctk.CTk):
         self.ids_entry.insert(0, str(novel_id))
         self.update_switch.select()
 
-        # Switch tabs and begin background download
         self.nav_var.set("Downloader")
         self.on_nav_changed("Downloader")
         self.start_scraper()
 
     def update_all_library(self):
-        """Scans for all local folders, collects valid novel IDs, and aggregates them into an automatic update pipeline."""
         out_dir = self.output_entry.get().strip() or "output"
         if not os.path.exists(out_dir):
             messagebox.showwarning("Warning", "Output directory does not exist yet.")
@@ -458,7 +439,6 @@ class PiaScrapGUI(ctk.CTk):
         if env_pass:
             self.pass_entry.insert(0, env_pass)
             
-        # Inspect stored cookies
         cfg = load_config()
         stored_login = (cfg.get("login_at") or "").strip()
         stored_user = (cfg.get("userkey") or "").strip()
@@ -481,9 +461,6 @@ class PiaScrapGUI(ctk.CTk):
             if hasattr(widget, "configure"):
                 widget.configure(state=state)
 
-    # ----------------------------
-    # Thread Processing Loop
-    # ----------------------------
     def start_scraper(self):
         if self.worker_thread and self.worker_thread.is_alive():
             messagebox.showwarning("Download in progress", "Wait for the current download or cancel it first.")
@@ -537,7 +514,6 @@ class PiaScrapGUI(ctk.CTk):
         self.cancel_btn.configure(state="normal")
         self._set_input_states(False)
         
-        # Spawn thread safely
         self.worker_thread = threading.Thread(
             target=self.run_background_scraper,
             args=(email, password, out_dir, max_chapters, throttle, threads, txt_mode, update_mode, debug_mode, lang, ids_raw, proxy),
@@ -546,7 +522,7 @@ class PiaScrapGUI(ctk.CTk):
         self.worker_thread.start()
 
     def run_background_scraper(self, email, password, out_dir, max_chapters, throttle, threads, txt_mode, update_mode, debug_mode, lang, ids_raw, proxy):
-        """Worker function containing blocking calls. Traps all exceptions to prevent thread crashes."""
+        """Catch worker exceptions so they cannot kill the UI thread."""
         try:
             engine = ScraperEngine(
                 email=email,
@@ -565,7 +541,6 @@ class PiaScrapGUI(ctk.CTk):
                 cancel_event=self.cancel_event
             )
             
-            # Blocking calls
             success = engine.initialize_client()
             if not success:
                 self.gui_queue.put(("error", "Could not initialize client. No credentials or saved tokens were found."))
@@ -600,11 +575,8 @@ class PiaScrapGUI(ctk.CTk):
         self.append_to_log("[GUI-CANCEL] User sent interrupt command. Closing thread execution safely...")
         self.cancel_event.set()
 
-    # ----------------------------
-    # Queue Processing & Dispatching
-    # ----------------------------
     def process_queue(self):
-        """Thread-safe update handler running entirely on the main UI thread."""
+        """Apply worker events on the UI thread."""
         try:
             while True:
                 task, data = self.gui_queue.get_nowait()

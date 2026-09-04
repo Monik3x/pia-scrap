@@ -1,6 +1,6 @@
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from bs4 import BeautifulSoup, Comment
 from src.helper import normalize_url
@@ -146,9 +146,6 @@ def parse_novel_metadata(
         tags=tags,
     )
 
-# ----------------------------
-# Novelpia Novel & Episodes Fetcher
-# ----------------------------
 
 def html_from_episode_text(raw_html: str) -> str:
     soup = BeautifulSoup(raw_html or "", "html.parser")
@@ -189,7 +186,9 @@ def html_from_episode_text(raw_html: str) -> str:
     # Return just the clean inner HTML, without forcing an <html> wrapper
     return "".join(str(tag) for tag in soup.contents)
 
-def fetch_novel_and_episodes(client, novel_id, max_chapters=None):
+def fetch_novel_and_episodes(
+    client, novel_id, max_chapters=None
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]], NovelMetadata]:
     logger.info("extracting metadata…")
     data_novel = client.novel(novel_id)
 
@@ -230,4 +229,4 @@ def fetch_novel_and_episodes(client, novel_id, max_chapters=None):
     if not ep_list:
         raise NoEpisodesError(f"Novel {novel_id} has no downloadable episodes.")
 
-    return data_novel, ep_list, metadata.title
+    return data_novel, ep_list, metadata
