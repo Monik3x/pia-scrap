@@ -2,7 +2,7 @@ import logging
 import os
 import threading
 from typing import List, Optional, Callable, Dict, Any
-from src.api import NovelpiaClient
+from src.api import DownloadCancelled, NovelpiaClient
 from src.builder import build_epub, build_txt
 from src.helper import build_book_directory_index, load_config, save_config, parse_range
 from src.novel import NovelSkipError
@@ -216,11 +216,10 @@ class ScraperEngine:
                         results_summary.append({"novel_id": novel_id, "status": "success", "title": title, "count": count, "type": "epub"})
                         success_count += 1
 
+            except DownloadCancelled:
+                self.update_status(f"[cancelled] Stopped processing {novel_id} due to user cancellation.")
+                break
             except Exception as e:
-                if self.cancel_event and self.cancel_event.is_set():
-                    self.update_status(f"[cancelled] Stopped processing {novel_id} due to user cancellation.")
-                    break
-
                 err_str = str(e)
                 response = getattr(e, "response", None)
                 status_code = getattr(response, "status_code", None)
@@ -236,9 +235,13 @@ class ScraperEngine:
                     logger.error(err_msg, exc_info=True)
                     self.update_status(f"[error] {err_msg}")
                     results_summary.append({"novel_id": novel_id, "status": "failed", "error": err_str})
-                
+
                 fail_count += 1
-                self.client.sleep_cooperative(1.0)
+                try:
+                    self.client.sleep_cooperative(1.0)
+                except DownloadCancelled:
+                    self.update_status("[cancelled] Download queue cancelled by user.")
+                    break
 
         summary_msg = f"Finished queue. Success: {success_count}, Skipped (Up to date): {skipped_count}, Failed/No Data: {fail_count}"
         self.update_status(f"[done] {summary_msg}")

@@ -29,6 +29,10 @@ logger = logging.getLogger("pia_scrap")
 # API Client
 # ----------------------------
 
+class DownloadCancelled(RuntimeError):
+    """The active download was cancelled by the user."""
+
+
 class NovelUnavailableError(NovelSkipError):
     """The requested novel ID is not assigned or is unavailable."""
 
@@ -69,14 +73,9 @@ class NovelpiaClient:
         except Exception as e:
             logger.error(f"Error setting cookies: {e}")
 
-    def sleep_cooperative(self, seconds: float):
+    def sleep_cooperative(self, seconds: float) -> None:
         """Sleep until the delay expires or cancellation is requested."""
-        if seconds <= 0:
-            return
-        if self.cancel_event:
-            self.cancel_event.wait(seconds)
-        else:
-            time.sleep(seconds)
+        _wait_for_retry(seconds, self.cancel_event, "wait")
 
     def login(self) -> Optional[str]:
         with self._auth_lock:
@@ -198,8 +197,7 @@ class NovelpiaClient:
         
         while True:
             if self.cancel_event and self.cancel_event.is_set():
-                logger.info("Library fetch interrupted by user cancel command.")
-                break
+                raise DownloadCancelled("Library fetch cancelled by user.")
 
             params = {
                 "sort": "desc",
@@ -275,9 +273,6 @@ class NovelpiaClient:
         params = {"episode_no": episode_no}
         if self.throttle:
             self.sleep_cooperative(random.uniform(self.throttle * 0.5, self.throttle))
-        
-        if self.cancel_event and self.cancel_event.is_set():
-            raise RuntimeError("Request cancelled by user request.")
 
         r = self._api_request(
             "GET", url, headers=headers, params=params, max_retries=4
@@ -303,9 +298,11 @@ class NovelpiaClient:
         episode_no: Optional[int] = None,
     ) -> Optional[bytes]:
         """GET an image with CDN cookie policy, without leaking session auth cookies."""
+        if self.cancel_event and self.cancel_event.is_set():
+            raise DownloadCancelled("Image download cancelled by user.")
         url = normalize_url(url)
         if not is_approved_image_url(url):
-            logger.warning(f"[warn] Blocked image URL outside approved Novelpia hosts: {url}")
+            logger.warning(f"Blocked image URL outside approved Novelpia hosts: {url}")
             return None
 
         last_error = "Unknown Error"
@@ -314,7 +311,7 @@ class NovelpiaClient:
         attempt = 1
         while attempt <= max_attempts:
             if self.cancel_event and self.cancel_event.is_set():
-                raise RuntimeError("Image download cancelled by user.")
+                raise DownloadCancelled("Image download cancelled by user.")
             try:
                 headers = dict(const.IMAGE_HEADERS)
                 headers["Referer"] = referer_url
@@ -331,7 +328,7 @@ class NovelpiaClient:
                     for key in ("USERKEY", "TKEY"):
                         try:
                             value = self.s.cookies.get(key)
-                        except Exception:
+                        except requests.RequestsError:
                             value = None
                         if value:
                             cookie_dict[key] = value
@@ -382,9 +379,9 @@ class NovelpiaClient:
                         max_attempts += 1
                         attempt += 1
                         continue
-                    except Exception as exc:
-                        if self.cancel_event and self.cancel_event.is_set():
-                            raise
+                    except DownloadCancelled:
+                        raise
+                    except (requests.RequestsError, RuntimeError) as exc:
                         last_error = (
                             f"HTTP 403; could not renew image authorization: {exc}"
                         )
@@ -393,15 +390,13 @@ class NovelpiaClient:
                 resp.raise_for_status()
                 return resp.content
 
-            except Exception as e:
-                if self.cancel_event and self.cancel_event.is_set():
-                    raise
+            except requests.RequestsError as e:
                 last_error = f"HTTP Error or Timeout: {e}"
                 if attempt < max_attempts:
                     self.sleep_cooperative(1.0)
             attempt += 1
 
-        logger.warning(f"[warn] Image error ({last_error}): {url}")
+        logger.warning(f"Image error ({last_error}): {url}")
         return None
 
 
@@ -409,9 +404,6 @@ class NovelpiaClient:
         url = f"{const.API_BASE}/v1/novel/episode/content"
         if self.throttle:
             self.sleep_cooperative(random.uniform(self.throttle * 0.5, self.throttle))
-            
-        if self.cancel_event and self.cancel_event.is_set():
-            raise RuntimeError("Request cancelled by user request.")
 
         r = self._api_request(
             "GET", url, params={"_t": token_t}, max_retries=3
@@ -420,96 +412,77 @@ class NovelpiaClient:
         return r.json()
 
     def fetch_episode(self, ep: Dict, idx: int = 0) -> Dict:
-        if self.cancel_event and self.cancel_event.is_set():
-            return {"error": "Cancelled by user", "epi_no": None, "epi_title": ep.get("epi_title") or f"Episode {ep.get('epi_num')}", "idx": idx}
-
         self.sleep_cooperative(random.uniform(0.1, 0.6))
-        
+
         episode_no = ep.get("episode_no")
+        epi_title = ep.get("epi_title") or f"Episode {ep.get('epi_num')}"
         if episode_no is None:
             return {
                 "error": "missing episode_no",
                 "epi_no": None,
-                "epi_title": ep.get("epi_title") or f"Episode {ep.get('epi_num')}",
-                "idx": idx,
-            }
-        epi_no = int(episode_no)
-        epi_title = ep.get("epi_title") or f"Episode {ep.get('epi_num')}"
-        
-        if self.cancel_event and self.cancel_event.is_set():
-            return {"error": "Cancelled by user", "epi_no": epi_no, "epi_title": epi_title, "idx": idx}
-
-        # 1) Ticket
-        logger.info(f"ticket for episode {ep.get('epi_num', idx)} - {epi_title}")
-        try:
-            tdata = self.episode_ticket(epi_no)
-        except Exception as e:
-            return {"error": str(e), "epi_no": epi_no, "epi_title": epi_title, "idx": idx}
-
-        token_t, direct_url = extract_t_token(tdata)
-        res_block = tdata.get("result") or {}
-        signed_key = res_block.get("signed_key", {}) if isinstance(res_block, dict) else {}
-        if not isinstance(signed_key, dict):
-            signed_key = {}
-
-        if not token_t and not direct_url:
-            return {"error": "no token found", "epi_no": epi_no, "epi_title": epi_title, "idx": idx}
-
-        if self.cancel_event and self.cancel_event.is_set():
-            return {"error": "Cancelled by user", "epi_no": epi_no, "epi_title": epi_title, "idx": idx}
-
-        # 2) Content
-        try:
-            if token_t:
-                cdata = self.episode_content(token_t)
-            else:
-                r = self.s.get(direct_url, timeout=self.timeout)
-                r.raise_for_status()
-                cdata = r.json()
-        except Exception as e:
-            return {"error": str(e), "epi_no": epi_no, "epi_title": epi_title, "idx": idx}
-
-        # 3) Extract HTML
-        result_block = cdata.get("result", {})
-        data_block = result_block.get("data", {}) if isinstance(result_block, dict) else {}
-
-        parts = []
-        if isinstance(data_block, dict):
-            def content_order(k: str):
-                match = re.search(r"(\d+)$", k)
-                return (0 if k == "epi_content" else 1, int(match.group(1)) if match else 0)
-
-            content_keys = [key for key in data_block if str(key).startswith("epi_content")]
-            for k in sorted(content_keys, key=content_order):
-                v = data_block.get(k)
-                if isinstance(v, str) and v:
-                    parts.append(v)
-
-        html_text = "".join(parts).strip()
-        if not html_text:
-            html_text = (
-                result_block.get("content")
-                or result_block.get("html")
-                or result_block.get("text")
-                or cdata.get("content")
-                or ""
-            )
-
-        if not isinstance(html_text, str) or not html_text.strip():
-            return {
-                "error": "episode content was empty",
-                "epi_no": epi_no,
                 "epi_title": epi_title,
-                "idx": idx,
             }
 
-        return {
-            "html": html_from_episode_text(html_text),
-            "epi_title": epi_title,
-            "epi_no": epi_no,
-            "idx": idx,
-            "signed_key": signed_key,
-        }
+        epi_no = episode_no
+        try:
+            epi_no = int(episode_no)
+
+            logger.info(f"ticket for episode {ep.get('epi_num', idx)} - {epi_title}")
+            tdata = self.episode_ticket(epi_no)
+
+            token_t = extract_t_token(tdata)
+            res_block = tdata.get("result") or {}
+            signed_key = res_block.get("signed_key", {}) if isinstance(res_block, dict) else {}
+            if not isinstance(signed_key, dict):
+                signed_key = {}
+
+            if not token_t:
+                return {"error": "no token found", "epi_no": epi_no, "epi_title": epi_title}
+
+            cdata = self.episode_content(token_t)
+
+            result_block = cdata.get("result", {})
+            data_block = result_block.get("data", {}) if isinstance(result_block, dict) else {}
+
+            parts = []
+            if isinstance(data_block, dict):
+                def content_order(k: str):
+                    match = re.search(r"(\d+)$", k)
+                    return (0 if k == "epi_content" else 1, int(match.group(1)) if match else 0)
+
+                content_keys = [key for key in data_block if str(key).startswith("epi_content")]
+                for k in sorted(content_keys, key=content_order):
+                    v = data_block.get(k)
+                    if isinstance(v, str) and v:
+                        parts.append(v)
+
+            html_text = "".join(parts).strip()
+            if not html_text:
+                html_text = (
+                    result_block.get("content")
+                    or result_block.get("html")
+                    or result_block.get("text")
+                    or cdata.get("content")
+                    or ""
+                )
+
+            if not isinstance(html_text, str) or not html_text.strip():
+                return {
+                    "error": "episode content was empty",
+                    "epi_no": epi_no,
+                    "epi_title": epi_title,
+                }
+
+            return {
+                "html": html_from_episode_text(html_text),
+                "epi_title": epi_title,
+                "epi_no": epi_no,
+                "signed_key": signed_key,
+            }
+        except (DownloadCancelled, KeyboardInterrupt):
+            raise
+        except Exception as e:
+            return {"error": str(e), "epi_no": epi_no, "epi_title": epi_title}
 
     def fetch_episodes_parallel(self, ep_list: List[Dict[str, Any]], max_workers: int = 2,
                                 progress_cb: Optional[Callable[[int, int, str], None]] = None,
@@ -534,11 +507,8 @@ class NovelpiaClient:
         if max_workers == 1:
             for idx, episode in enumerate(ep_list):
                 if self.cancel_event and self.cancel_event.is_set():
-                    raise RuntimeError("Download stopped by cancellation request.")
-                try:
-                    result = self.fetch_episode(episode, idx + 1)
-                except Exception as exc:
-                    result = {"error": str(exc), "idx": idx + 1}
+                    raise DownloadCancelled("Download stopped by cancellation request.")
+                result = self.fetch_episode(episode, idx + 1)
                 store_result(idx, result)
             return results
 
@@ -550,16 +520,13 @@ class NovelpiaClient:
             try:
                 for future in concurrent.futures.as_completed(future_to_idx):
                     if self.cancel_event and self.cancel_event.is_set():
-                        raise RuntimeError("Download pool stopped by cancellation request.")
+                        raise DownloadCancelled("Download pool stopped by cancellation request.")
 
                     idx = future_to_idx[future]
-                    try:
-                        res = future.result()
-                    except Exception as e:
-                        res = {"error": str(e), "idx": idx + 1}
+                    res = future.result()
                     store_result(idx, res)
-            except (KeyboardInterrupt, RuntimeError) as e:
-                logger.warning(f"[warn] Fetch process interrupted gracefully: {e}")
+            except (KeyboardInterrupt, DownloadCancelled) as e:
+                logger.warning(f"Fetch process interrupted gracefully: {e}")
                 for fut in future_to_idx:
                     fut.cancel()
                 raise
@@ -567,10 +534,12 @@ class NovelpiaClient:
 
 def _wait_for_retry(seconds: float, cancel_event, reason: str) -> None:
     if seconds <= 0:
+        if cancel_event and cancel_event.is_set():
+            raise DownloadCancelled(f"Request cancelled during {reason}.")
         return
     if cancel_event:
         if cancel_event.wait(seconds):
-            raise RuntimeError(f"Request cancelled during {reason}.")
+            raise DownloadCancelled(f"Request cancelled during {reason}.")
     else:
         time.sleep(seconds)
 
@@ -699,7 +668,7 @@ def request_with_retries(session: requests.Session, method: str, url: str, *,
 
     for attempt in range(1, max_retries + 1):
         if cancel_event and cancel_event.is_set():
-            raise RuntimeError("Request cancelled.")
+            raise DownloadCancelled("Request cancelled.")
 
         try:
             response = send_request()
@@ -723,6 +692,8 @@ def request_with_retries(session: requests.Session, method: str, url: str, *,
                         response = send_request()
                         if not _response_requires_auth(response):
                             break
+                    except DownloadCancelled:
+                        raise
                     except Exception as exc:
                         if recovery_name == "refresh":
                             did_refresh = True

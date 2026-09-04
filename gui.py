@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 
+from src.api import DownloadCancelled
 from src.engine import ScraperEngine
 from src.helper import list_local_book_directories, load_config, load_local_book_info, local_library_novel_ids
 from src import const
@@ -587,10 +588,10 @@ class PiaScrapGUI(ctk.CTk):
             
             self.gui_queue.put(("done", summary))
             
+        except DownloadCancelled:
+            self.gui_queue.put(("done", {"success": 0, "skipped": 0, "failed": 0, "results": []}))
+            return
         except Exception as e:
-            if self.cancel_event.is_set():
-                self.gui_queue.put(("done", {"success": 0, "skipped": 0, "failed": 0, "results": []}))
-                return
             tb_msg = "".join(traceback.format_exception(type(e), e, e.__traceback__))
             self.gui_queue.put(("error", f"An exception occurred inside the background thread:\n{e}\n\n{tb_msg}"))
 

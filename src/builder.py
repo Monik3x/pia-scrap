@@ -5,7 +5,6 @@ import zipfile
 from typing import Callable, Dict, List, Optional
 
 from bs4 import BeautifulSoup
-from tqdm import tqdm
 from src.const import BASE_URL, EPISODE_REVISION_FIELD
 from src.epub import EpubBuilder
 from src.helper import book_output_paths, ensure_dir, sanitize_filename, write_json_atomic, write_text_atomic
@@ -38,7 +37,7 @@ def _chapter_revisions_match(chapters_path: str, episodes: List[Dict]) -> bool:
                 json.loads(line) for line in chapter_file if line.strip()
             ]
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        logger.warning(f"[warn] Ignoring invalid chapter metadata {chapters_path}: {exc}")
+        logger.warning(f"Ignoring invalid chapter metadata {chapters_path}: {exc}")
         return False
 
     if len(stored_chapters) < len(episodes):
@@ -90,7 +89,7 @@ def _cached_episode_result(cache_file: str, epi_no: int, episode: Dict) -> Optio
     except FileNotFoundError:
         return None
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        logger.warning(f"[warn] Ignoring invalid episode cache {cache_file}: {exc}")
+        logger.warning(f"Ignoring invalid episode cache {cache_file}: {exc}")
         return None
 
     try:
@@ -121,7 +120,7 @@ def _write_episode_cache(cache_file: str, result: Dict, revision) -> None:
         cache_record[EPISODE_REVISION_FIELD] = revision
         write_json_atomic(cache_file, cache_record)
     except (OSError, TypeError, ValueError) as exc:
-        logger.warning(f"[warn] Could not cache episode {epi_no}: {exc}")
+        logger.warning(f"Could not cache episode {epi_no}: {exc}")
 
 def _raise_chapter_fetch_failures(results: List[Optional[Dict]], unchanged_message: str) -> None:
     failures = []
@@ -180,17 +179,11 @@ def _load_or_fetch_episodes(
     }
 
     if to_fetch:
-        pbar = None
-        if not progress_cb:
-            pbar = tqdm(total=len(to_fetch), desc="Fetching chapters", unit="chap")
-
         completed_count = 0
 
         def internal_progress_cb(curr, tot, label):
             nonlocal completed_count
             completed_count += 1
-            if pbar:
-                pbar.update(1)
             if progress_cb:
                 progress_cb(cached_count + completed_count, len(episodes), label)
 
@@ -207,13 +200,11 @@ def _load_or_fetch_episodes(
             )
 
         fetched = client.fetch_episodes_parallel(
-            to_fetch, max_workers=threads,
+            to_fetch,
+            max_workers=threads,
             progress_cb=internal_progress_cb,
             on_complete_cb=cache_fetched_episode if update_mode else None,
         )
-
-        if pbar:
-            pbar.close()
 
         for i, res in enumerate(fetched):
             orig_idx = fetch_indices[i]
@@ -261,12 +252,12 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
                     )
                 if packaged_chapters != existing_chapters:
                     logger.warning(
-                        f"[warn] Rebuilding '{title}': metadata lists {existing_chapters} "
+                        f"Rebuilding '{title}': metadata lists {existing_chapters} "
                         f"chapters but the EPUB contains {max(packaged_chapters, 0)}."
                     )
             except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 existing_chapters = None
-                logger.warning(f"[warn] Ignoring invalid update metadata {meta_path}: {exc}")
+                logger.warning(f"Ignoring invalid update metadata {meta_path}: {exc}")
 
         if (
             existing_chapters is not None

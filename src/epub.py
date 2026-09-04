@@ -10,6 +10,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from ebooklib import epub
+from src.api import DownloadCancelled
 from src.const import BASE_URL
 from src.helper import (
     BookOutputPaths,
@@ -56,7 +57,7 @@ def _load_image_index(path: str) -> Dict[str, Dict[str, str]]:
     except FileNotFoundError:
         return {}
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        logger.warning(f"[warn] Ignoring invalid image index {path}: {exc}")
+        logger.warning(f"Ignoring invalid image index {path}: {exc}")
         return {}
 
     if not isinstance(data, dict) or data.get("version") != IMAGE_INDEX_VERSION:
@@ -103,7 +104,7 @@ def _zip_member_bytes(
         try:
             return archive.read(candidate)
         except (OSError, zipfile.BadZipFile, KeyError) as exc:
-            logger.warning(f"[warn] Could not read {file_name} from EPUB: {exc}")
+            logger.warning(f"Could not read {file_name} from EPUB: {exc}")
             return None
     return None
 
@@ -125,7 +126,7 @@ def _read_legacy_image_cache(image_cache_dir: str, url: str) -> Optional[bytes]:
     except FileNotFoundError:
         return None
     except OSError as exc:
-        logger.warning(f"[warn] Could not read cached image {cache_path}: {exc}")
+        logger.warning(f"Could not read cached image {cache_path}: {exc}")
     return None
 
 
@@ -136,7 +137,7 @@ def _remove_legacy_image_cache(image_cache_dir: str) -> None:
         shutil.rmtree(image_cache_dir)
     except OSError as exc:
         logger.warning(
-            f"[warn] Could not remove leftover image cache {image_cache_dir}: {exc}"
+            f"Could not remove leftover image cache {image_cache_dir}: {exc}"
         )
 
 
@@ -162,7 +163,7 @@ class _EpubImageStore:
 
     def _raise_if_cancelled(self) -> None:
         if self.cancel_event and self.cancel_event.is_set():
-            raise RuntimeError("Image download cancelled by user.")
+            raise DownloadCancelled("Image download cancelled by user.")
 
     def _prime_from_index_and_epub(self) -> None:
         index = _load_image_index(self.paths.image_index_path)
@@ -183,7 +184,7 @@ class _EpubImageStore:
                         self.digest_bytes[digest] = data
                         self._reused += 1
         except (OSError, zipfile.BadZipFile) as exc:
-            logger.warning(f"[warn] Could not open existing EPUB for image reuse: {exc}")
+            logger.warning(f"Could not open existing EPUB for image reuse: {exc}")
         if self._reused:
             logger.info(f"Reusing {self._reused} unique images from the existing EPUB.")
 
@@ -248,7 +249,7 @@ class _EpubImageStore:
                 _write_image_index(self.paths.image_index_path, images)
             except OSError as exc:
                 logger.warning(
-                    f"[warn] Could not write image index {self.paths.image_index_path}: {exc}"
+                    f"Could not write image index {self.paths.image_index_path}: {exc}"
                 )
         _remove_legacy_image_cache(self.paths.image_cache_dir)
 

@@ -9,7 +9,7 @@ A fork of [pia-scrap](https://github.com/bayue48/pia-scrap) by bayue48, was pers
 ## Requirements
 
 - Python 3.9+
-- Packages: `curl_cffi`, `beautifulsoup4`, `ebooklib`, `tqdm`, `python-dotenv`, `customtkinter`
+- Packages: `curl_cffi`, `beautifulsoup4`, `ebooklib`, `python-dotenv`, `customtkinter`
 
 ```bash
 pip install -r requirements.txt

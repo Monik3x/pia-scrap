@@ -41,8 +41,6 @@ class BookOutputPaths:
 class LocalBookInfo:
     """Identity and listing fields for one local book directory."""
 
-    directory_name: str
-    book_dir: str
     novel_id: Optional[int]
     title: str
     author: str
@@ -308,8 +306,6 @@ def load_local_book_info(book_dir: str) -> LocalBookInfo:
         logger.warning(f"Ignoring invalid local book metadata {meta_path}: {exc}")
 
     return LocalBookInfo(
-        directory_name=directory_name,
-        book_dir=book_dir,
         novel_id=novel_id,
         title=title,
         author=author,
@@ -499,7 +495,7 @@ def attach_auth_cookies(session, headers=None):
     return headers
 
 # ----------------------------
-# Token extraction (STRICT)
+# Token extraction
 # ----------------------------
 
 def iter_strings(obj):
@@ -512,10 +508,9 @@ def iter_strings(obj):
         for v in obj:
             yield from iter_strings(v)
 
-def extract_t_token(tdata: dict) -> Tuple[Optional[str], Optional[str]]:
-    """Return (token, direct_content_url_or_none).
-    Prefer JWT-like tokens, but accept any non-empty string if present.
-    If using URL, accept any _t value on the official content endpoint.
+def extract_t_token(tdata: dict) -> Optional[str]:
+    """Return a content token from ticket data, preferring JWT-like values.
+    Accepts nested `_t`/`t`/`token` fields and `_t` on the official content URL.
     """
     res = tdata.get("result") or {}
     if not isinstance(res, dict):
@@ -527,7 +522,7 @@ def extract_t_token(tdata: dict) -> Tuple[Optional[str], Optional[str]]:
         v = res.get(k)
         if isinstance(v, str) and v:
             if looks_like_jwt(v):
-                return v, None
+                return v
             fallback_token = fallback_token or v
 
     # 2) nested dicts under result
@@ -538,7 +533,7 @@ def extract_t_token(tdata: dict) -> Tuple[Optional[str], Optional[str]]:
                     vv = v.get(k)
                     if isinstance(vv, str) and vv:
                         if looks_like_jwt(vv):
-                            return vv, None
+                            return vv
                         fallback_token = fallback_token or vv
 
     # 3) URL that is the official content endpoint with any _t
@@ -551,15 +546,12 @@ def extract_t_token(tdata: dict) -> Tuple[Optional[str], Optional[str]]:
                     cand = (q.get("_t") or [None])[0]
                     if isinstance(cand, str) and cand:
                         if looks_like_jwt(cand):
-                            return cand, s
-                        # fallback
+                            return cand
                         fallback_token = fallback_token or cand
             except Exception as e:
                 logger.error(f"Error occurred while parsing URL: {e}")
                 pass
-    if fallback_token:
-        return fallback_token, None
-    return None, None
+    return fallback_token
 
 # ----------------------------
 # Advanced Range Parsing
