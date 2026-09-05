@@ -193,7 +193,7 @@ def book_directory_novel_id(book_dir: str) -> Optional[int]:
 
 
 def _iter_book_dir_entries(out_dir: str) -> Iterator[os.DirEntry]:
-    # Does not skip '.' names or catch scandir errors.
+    """Yield child directories, including '.' names. Callers catch OSError from scandir."""
     with os.scandir(out_dir) as iterator:
         entries = sorted(iterator, key=lambda entry: entry.name.casefold())
     for entry in entries:
@@ -249,6 +249,7 @@ def build_book_directory_index(out_dir: str) -> Dict[int, str]:
 
 
 def list_local_book_directories(out_dir: str) -> List[str]:
+    """Return sorted folder names, skipping names that start with '.'."""
     names: List[str] = []
     try:
         entries = list(_iter_book_dir_entries(out_dir))
@@ -391,7 +392,9 @@ def book_output_paths(
 
 
 def ensure_book_identity(paths: BookOutputPaths) -> None:
-    """Write .novel_id before cache or EPUB files so a cancelled run still owns this folder."""
+    """Write .novel_id before cache or EPUB work so a cancelled run still owns this folder.
+    Refuse to write if the folder already belongs to a different novel.
+    """
     novel_id = paths.novel_id
     if novel_id is None:
         return

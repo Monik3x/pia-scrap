@@ -185,6 +185,7 @@ def _load_or_fetch_episodes(
         completed_count = 0
 
         def internal_progress_cb(curr, tot, label):
+            # as_completed is unordered; count locally and include cache hits.
             nonlocal completed_count
             completed_count += 1
             if progress_cb:
@@ -195,6 +196,7 @@ def _load_or_fetch_episodes(
                 return
             html = result.get("html")
             if isinstance(html, str):
+                # Sanitize once here so the cache and both outputs share the same HTML.
                 result["html"] = html_from_episode_text(html)
             if not update_mode:
                 return

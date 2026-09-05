@@ -183,7 +183,6 @@ def html_from_episode_text(raw_html: str) -> str:
         if img.get("src"):
             img["src"] = normalize_url(img["src"])
 
-    # Return just the clean inner HTML, without forcing an <html> wrapper
     return "".join(str(tag) for tag in soup.contents)
 
 def fetch_novel_and_episodes(

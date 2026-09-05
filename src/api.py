@@ -71,6 +71,7 @@ class NovelpiaClient:
             logger.error(f"Error setting cookies: {e}")
 
     def sleep_cooperative(self, seconds: float) -> None:
+        """Wait, or raise DownloadCancelled if the cancel event is set."""
         _wait_for_retry(seconds, self.cancel_event, "wait")
 
     def login(self) -> Optional[str]:
@@ -404,6 +405,7 @@ class NovelpiaClient:
         return r.json()
 
     def fetch_episode(self, ep: Dict, idx: int = 0) -> Dict:
+        """Return a result dict with chapter HTML or an error; cancel raises DownloadCancelled."""
         self.sleep_cooperative(random.uniform(0.1, 0.6))
 
         episode_no = ep.get("episode_no")

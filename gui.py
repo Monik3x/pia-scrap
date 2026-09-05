@@ -10,7 +10,7 @@ import customtkinter as ctk
 from tkinter import filedialog, messagebox
 
 from src.api import DownloadCancelled
-from src.engine import ScraperEngine
+from src.engine import ScraperEngine, format_run_recap
 from src.helper import list_local_book_directories, load_config, load_local_book_info, local_library_novel_ids
 from src import const
 
@@ -547,13 +547,19 @@ class PiaScrapGUI(ctk.CTk):
                 return
                 
             if self.cancel_event.is_set():
-                self.gui_queue.put(("done", {"success": 0, "skipped": 0, "failed": 0, "results": []}))
+                self.gui_queue.put((
+                    "done",
+                    {"success": 0, "skipped": 0, "failed": 0, "results": [], "cancelled": True},
+                ))
                 return
                 
             self.gui_queue.put(("status", "Resolving novel IDs..."))
             target_ids = engine.resolve_novel_ids(ids_raw)
             if self.cancel_event.is_set():
-                self.gui_queue.put(("done", {"success": 0, "skipped": 0, "failed": 0, "results": []}))
+                self.gui_queue.put((
+                    "done",
+                    {"success": 0, "skipped": 0, "failed": 0, "results": [], "cancelled": True},
+                ))
                 return
             if not target_ids:
                 self.gui_queue.put(("error", f"No valid novels found for: {ids_raw}. Check the selected list or confirm IDs are valid."))
@@ -564,7 +570,10 @@ class PiaScrapGUI(ctk.CTk):
             self.gui_queue.put(("done", summary))
             
         except DownloadCancelled:
-            self.gui_queue.put(("done", {"success": 0, "skipped": 0, "failed": 0, "results": []}))
+            self.gui_queue.put((
+                "done",
+                {"success": 0, "skipped": 0, "failed": 0, "results": [], "cancelled": True},
+            ))
             return
         except Exception as e:
             tb_msg = "".join(traceback.format_exception(type(e), e, e.__traceback__))
@@ -599,23 +608,38 @@ class PiaScrapGUI(ctk.CTk):
         self.after(50, self.process_queue)
 
     def on_download_complete(self, summary: Dict[str, Any]):
+        dialog_recap = format_run_recap(summary, max_lines=40)
+        report_path = summary.get("report_path")
         if self.cancel_event.is_set():
             self.status_label.configure(text="Status: Cancelled")
             self.append_to_log("--- Process Cancelled ---")
-            messagebox.showinfo("Cancelled", "Download queue was cancelled.")
+            if report_path:
+                self.append_to_log(f"Report: {report_path}")
+            messagebox.showinfo(
+                "Cancelled",
+                "Download queue was cancelled.\n\n" + dialog_recap,
+            )
         else:
             success = summary["success"]
             skipped = summary["skipped"]
             failed = summary["failed"]
+            has_issues = bool(summary.get("run_issues")) or any(
+                item.get("issues") for item in summary.get("results") or []
+            )
             details = f"Succeeded: {success} | Up to date: {skipped} | Failed: {failed}"
             self.append_to_log(f"\n--- Process Complete ---\n{details}")
+            if report_path:
+                self.append_to_log(f"Report: {report_path}")
             if failed:
                 self.status_label.configure(text="Status: Completed with errors")
-                messagebox.showwarning("Completed with errors", details)
+                messagebox.showwarning("Completed with errors", dialog_recap)
+            elif has_issues:
+                self.status_label.configure(text="Status: Completed with warnings")
+                messagebox.showwarning("Completed with warnings", dialog_recap)
             else:
                 self.status_label.configure(text="Status: Completed!")
                 messagebox.showinfo("All completed", details)
-        
+
         self._reset_ui()
         self.full_scan_library()
 

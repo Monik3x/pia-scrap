@@ -1,13 +1,149 @@
 import logging
 import os
 import threading
+from datetime import datetime, timezone
 from typing import List, Optional, Callable, Dict, Any
 from src.api import DownloadCancelled, NovelpiaClient
 from src.builder import build_epub, build_txt
-from src.helper import build_book_directory_index, load_config, save_config, parse_range
+from src.helper import (
+    build_book_directory_index,
+    load_config,
+    parse_range,
+    save_config,
+    write_text_atomic,
+)
 from src.novel import NovelSkipError
 
 logger = logging.getLogger("pia_scrap")
+
+# Outcome statuses that are not clean success / up-to-date skip.
+_PROBLEM_STATUSES = frozenset({"failed", "404", "not_exist", "no_data"})
+
+
+class _IssueCollector(logging.Handler):
+    """Capture WARNING+ from pia_scrap during a download queue."""
+
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self.current_novel_id: Optional[int] = None
+        self._lock = threading.Lock()
+        self._by_novel: Dict[Optional[int], List[str]] = {}
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = record.getMessage()
+            if not msg:
+                return
+            with self._lock:
+                bucket = self._by_novel.setdefault(self.current_novel_id, [])
+                if msg not in bucket:
+                    bucket.append(msg)
+        except Exception:
+            self.handleError(record)
+
+    def take(self, novel_id: Optional[int]) -> List[str]:
+        with self._lock:
+            return list(self._by_novel.pop(novel_id, []))
+
+    def peek_run_issues(self) -> List[str]:
+        with self._lock:
+            return list(self._by_novel.get(None, []))
+
+
+def _attach_issues(entry: Dict[str, Any], issues: List[str]) -> None:
+    if not issues:
+        return
+    error_text = entry.get("error") or ""
+    filtered = [msg for msg in issues if not error_text or error_text not in msg]
+    if filtered:
+        entry["issues"] = filtered
+
+
+def _novel_recap_label(item: Dict[str, Any]) -> str:
+    novel_id = item.get("novel_id")
+    title = item.get("title")
+    if title:
+        return f"ID {novel_id} ({title})"
+    return f"ID {novel_id}"
+
+
+def format_run_recap(summary: Dict[str, Any], *, max_lines: Optional[int] = None) -> str:
+    """Build a readable end-of-run recap from run_download_queue results."""
+    results = list(summary.get("results") or [])
+    run_issues = list(summary.get("run_issues") or [])
+    problem_lines: List[str] = []
+    issue_lines: List[str] = []
+    issue_count = 0
+
+    for item in results:
+        label = _novel_recap_label(item)
+        status = item.get("status")
+        # cancelled is display-only; failed totals stay on real failures.
+        if status in _PROBLEM_STATUSES or status == "cancelled":
+            extra = item.get("error") or status
+            problem_lines.append(f"  {label}: {extra}")
+        for msg in item.get("issues") or []:
+            issue_count += 1
+            issue_lines.append(f"  {label}: {msg}")
+
+    warning_count = len(run_issues) + issue_count
+    lines = [
+        f"Succeeded: {summary.get('success', 0)} | "
+        f"Up to date: {summary.get('skipped', 0)} | "
+        f"Failed/No Data: {summary.get('failed', 0)} | "
+        f"Warnings: {warning_count}"
+    ]
+
+    cancelled = bool(summary.get("cancelled"))
+    if cancelled:
+        lines.append("Download queue was interrupted.")
+
+    if not problem_lines and not issue_lines and not run_issues:
+        if not cancelled:
+            lines.append("No failures or warnings.")
+    else:
+        if run_issues:
+            lines.append("")
+            lines.append("Run-level warnings:")
+            for msg in run_issues:
+                lines.append(f"  - {msg}")
+        if problem_lines:
+            lines.append("")
+            lines.append("Novels that did not complete:")
+            lines.extend(problem_lines)
+        if issue_lines:
+            lines.append("")
+            lines.append("Intra-novel warnings:")
+            lines.extend(issue_lines)
+
+    report_path = summary.get("report_path")
+    if report_path:
+        lines.append("")
+        lines.append(f"Report saved to: {report_path}")
+
+    if max_lines is not None and max_lines > 0 and len(lines) > max_lines:
+        kept = lines[:max_lines]
+        kept.append(
+            f"... ({len(lines) - max_lines} more lines; see console or last_run_report.txt)"
+        )
+        return "\n".join(kept)
+    return "\n".join(lines)
+
+
+def write_run_report(out_dir: str, recap: str) -> Optional[str]:
+    """Persist the recap under out_dir for review after the process exits."""
+    if not out_dir:
+        return None
+    try:
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+        body = f"pia-scrap run report ({stamp})\n\n{recap.rstrip()}\n"
+        path = os.path.join(out_dir, "last_run_report.txt")
+        write_text_atomic(path, body)
+        return path
+    except OSError as exc:
+        logger.warning(f"Could not write run report under {out_dir}: {exc}")
+        return None
+
 
 def _skip_warning(exc: NovelSkipError) -> str:
     text = str(exc).rstrip()
@@ -152,100 +288,172 @@ class ScraperEngine:
         success_count = 0
         fail_count = 0
         skipped_count = 0
+        cancelled = False
         results_summary = []
+        collector = _IssueCollector()
+        pia_logger = logging.getLogger("pia_scrap")
+        pia_logger.addHandler(collector)
 
-        total_novels = len(target_ids)
-        self.update_status(f"Starting download queue of {total_novels} novels...")
-        book_index = build_book_directory_index(self.out_dir)
+        try:
+            total_novels = len(target_ids)
+            self.update_status(f"Starting download queue of {total_novels} novels...")
+            book_index = build_book_directory_index(self.out_dir)
 
-        for idx, novel_id in enumerate(target_ids):
-            if self.cancel_event and self.cancel_event.is_set():
-                self.update_status("[cancelled] Download queue cancelled by user.")
-                break
-
-            msg = f"Processing ID {novel_id} ({idx+1}/{total_novels})"
-            self.update_status(f"--- {msg} ---")
-            
-            self.update_progress(0, 1, "Starting...")
-
-            try:
-                if self.txt_mode:
-                    out_dir_final, title, count = build_txt(
-                        client=self.client,
-                        novel_id=novel_id,
-                        out_dir=self.out_dir,
-                        max_chapters=(self.max_chapters if self.max_chapters > 0 else None),
-                        threads=self.threads,
-                        update_mode=self.update_mode,
-                        progress_cb=self.update_progress,
-                        status_cb=self.update_status,
-                        book_index=book_index,
-                    )
-                    success_msg = f"Wrote TXT files under: {out_dir_final} | Title: {title} | Chapters: {count}"
-                    self.update_status(f"[success] {success_msg}")
-                    results_summary.append({"novel_id": novel_id, "status": "success", "title": title, "count": count, "type": "txt"})
-                    success_count += 1
-                else:
-                    out_file, title, count = build_epub(
-                        client=self.client,
-                        novel_id=novel_id,
-                        out_dir=self.out_dir,
-                        max_chapters=(self.max_chapters if self.max_chapters > 0 else None),
-                        language=self.language,
-                        update_mode=self.update_mode,
-                        threads=self.threads,
-                        progress_cb=self.update_progress,
-                        status_cb=self.update_status,
-                        book_index=book_index,
-                    )
-
-                    if out_file is None:
-                        skipped_msg = (
-                            f"Novel '{title}' is already up to date "
-                            f"({count} chapters). Skipping."
-                        )
-                        self.update_status(f"[skipped] {skipped_msg}")
-                        results_summary.append({"novel_id": novel_id, "status": "skipped", "title": title})
-                        skipped_count += 1
-                    else:
-                        success_msg = f"Wrote EPUB: {out_file} | Title: {title} | Chapters: {count}\n"
-                        self.update_status(f"[success] {success_msg}")
-                        results_summary.append({"novel_id": novel_id, "status": "success", "title": title, "count": count, "type": "epub"})
-                        success_count += 1
-
-            except DownloadCancelled:
-                self.update_status(f"[cancelled] Stopped processing {novel_id} due to user cancellation.")
-                break
-            except Exception as e:
-                err_str = str(e)
-                response = getattr(e, "response", None)
-                status_code = getattr(response, "status_code", None)
-                if isinstance(e, NovelSkipError):
-                    self.update_status(f"[warn] {_skip_warning(e)}")
-                    results_summary.append({"novel_id": novel_id, "status": e.result_status})
-                elif status_code == 404:
-                    warn_msg = f"Novel {novel_id} returned 404. Skipping."
-                    self.update_status(f"[warn] {warn_msg}")
-                    results_summary.append({"novel_id": novel_id, "status": "404"})
-                else:
-                    err_msg = f"Failed processing {novel_id}: {e}"
-                    logger.error(err_msg, exc_info=True)
-                    self.update_status(f"[error] {err_msg}")
-                    results_summary.append({"novel_id": novel_id, "status": "failed", "error": err_str})
-
-                fail_count += 1
-                try:
-                    self.client.sleep_cooperative(1.0)
-                except DownloadCancelled:
+            for idx, novel_id in enumerate(target_ids):
+                if self.cancel_event and self.cancel_event.is_set():
                     self.update_status("[cancelled] Download queue cancelled by user.")
+                    cancelled = True
                     break
 
-        summary_msg = f"Finished queue. Success: {success_count}, Skipped (Up to date): {skipped_count}, Failed/No Data: {fail_count}"
-        self.update_status(f"[done] {summary_msg}")
+                msg = f"Processing ID {novel_id} ({idx+1}/{total_novels})"
+                self.update_status(f"--- {msg} ---")
+                collector.current_novel_id = novel_id
+                self.update_progress(0, 1, "Starting...")
+                entry: Optional[Dict[str, Any]] = None
 
-        return {
-            "success": success_count,
-            "skipped": skipped_count,
-            "failed": fail_count,
-            "results": results_summary
-        }
+                try:
+                    if self.txt_mode:
+                        # TXT always rewrites chapter files. Only EPUB returns None when up to date.
+                        out_dir_final, title, count = build_txt(
+                            client=self.client,
+                            novel_id=novel_id,
+                            out_dir=self.out_dir,
+                            max_chapters=(self.max_chapters if self.max_chapters > 0 else None),
+                            threads=self.threads,
+                            update_mode=self.update_mode,
+                            progress_cb=self.update_progress,
+                            status_cb=self.update_status,
+                            book_index=book_index,
+                        )
+                        success_msg = f"Wrote TXT files under: {out_dir_final} | Title: {title} | Chapters: {count}"
+                        self.update_status(f"[success] {success_msg}")
+                        entry = {
+                            "novel_id": novel_id,
+                            "status": "success",
+                            "title": title,
+                            "count": count,
+                            "type": "txt",
+                        }
+                        success_count += 1
+                    else:
+                        out_file, title, count = build_epub(
+                            client=self.client,
+                            novel_id=novel_id,
+                            out_dir=self.out_dir,
+                            max_chapters=(self.max_chapters if self.max_chapters > 0 else None),
+                            language=self.language,
+                            update_mode=self.update_mode,
+                            threads=self.threads,
+                            progress_cb=self.update_progress,
+                            status_cb=self.update_status,
+                            book_index=book_index,
+                        )
+
+                        if out_file is None:
+                            skipped_msg = (
+                                f"Novel '{title}' is already up to date "
+                                f"({count} chapters). Skipping."
+                            )
+                            self.update_status(f"[skipped] {skipped_msg}")
+                            entry = {"novel_id": novel_id, "status": "skipped", "title": title}
+                            skipped_count += 1
+                        else:
+                            success_msg = f"Wrote EPUB: {out_file} | Title: {title} | Chapters: {count}\n"
+                            self.update_status(f"[success] {success_msg}")
+                            entry = {
+                                "novel_id": novel_id,
+                                "status": "success",
+                                "title": title,
+                                "count": count,
+                                "type": "epub",
+                            }
+                            success_count += 1
+
+                except DownloadCancelled:
+                    cancel_msg = (
+                        f"Stopped processing {novel_id} due to user cancellation."
+                    )
+                    self.update_status(f"[cancelled] {cancel_msg}")
+                    entry = {
+                        "novel_id": novel_id,
+                        "status": "cancelled",
+                        "error": cancel_msg,
+                    }
+                    _attach_issues(entry, collector.take(novel_id))
+                    results_summary.append(entry)
+                    entry = None
+                    collector.current_novel_id = None
+                    cancelled = True
+                    break
+                except Exception as e:
+                    err_str = str(e)
+                    response = getattr(e, "response", None)
+                    status_code = getattr(response, "status_code", None)
+                    if isinstance(e, NovelSkipError):
+                        warn_msg = _skip_warning(e)
+                        self.update_status(f"[warn] {warn_msg}")
+                        entry = {
+                            "novel_id": novel_id,
+                            "status": e.result_status,
+                            "error": warn_msg,
+                        }
+                    elif status_code == 404:
+                        warn_msg = f"Novel {novel_id} returned 404. Skipping."
+                        self.update_status(f"[warn] {warn_msg}")
+                        entry = {
+                            "novel_id": novel_id,
+                            "status": "404",
+                            "error": warn_msg,
+                        }
+                    else:
+                        err_msg = f"Failed processing {novel_id}: {e}"
+                        logger.error(err_msg, exc_info=True)
+                        self.update_status(f"[error] {err_msg}")
+                        entry = {"novel_id": novel_id, "status": "failed", "error": err_str}
+
+                    fail_count += 1
+                    try:
+                        self.client.sleep_cooperative(1.0)
+                    except DownloadCancelled:
+                        self.update_status("[cancelled] Download queue cancelled by user.")
+                        if entry is not None:
+                            _attach_issues(entry, collector.take(novel_id))
+                            results_summary.append(entry)
+                            entry = None
+                        collector.current_novel_id = None
+                        cancelled = True
+                        break
+
+                if entry is not None:
+                    _attach_issues(entry, collector.take(novel_id))
+                    results_summary.append(entry)
+                collector.current_novel_id = None
+
+            summary_msg = (
+                f"Finished queue. Success: {success_count}, "
+                f"Skipped (Up to date): {skipped_count}, Failed/No Data: {fail_count}"
+            )
+            self.update_status(f"[done] {summary_msg}")
+
+            summary: Dict[str, Any] = {
+                "success": success_count,
+                "skipped": skipped_count,
+                "failed": fail_count,
+                "results": results_summary,
+            }
+            if cancelled:
+                summary["cancelled"] = True
+            run_issues = collector.peek_run_issues()
+            if run_issues:
+                summary["run_issues"] = run_issues
+
+            recap = format_run_recap(summary)
+            report_path = write_run_report(self.out_dir, recap)
+            if report_path:
+                summary["report_path"] = report_path
+                recap = format_run_recap(summary)
+            # Recap is logger-only so the GUI status label stays one line.
+            logger.info("=== Run recap ===\n%s", recap)
+            return summary
+        finally:
+            pia_logger.removeHandler(collector)
