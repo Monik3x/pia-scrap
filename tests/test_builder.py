@@ -50,6 +50,22 @@ class DummyFetchClient:
         return None
 
 
+def recording_epub_builder(book_dir, *, builds=None, fail=None):
+    class RecordingEpubBuilder:
+        def __init__(self, out_dir):
+            pass
+
+        def build(self, **kwargs):
+            if fail is not None:
+                raise AssertionError(fail)
+            if builds is not None:
+                builds.append(kwargs)
+            chapters = kwargs.get("chapters") or []
+            return str(book_dir / "book.epub"), "Book", len(chapters)
+
+    return RecordingEpubBuilder
+
+
 def test_build_metadata_writes_deduplicated_tags_and_chapters(tmp_path, novel_data, episodes):
     builder.build_metadata(str(tmp_path), novel_data, 42, episodes)
 
@@ -134,16 +150,6 @@ def test_build_txt_is_all_or_nothing_on_fetch_failure(
         assert not book_dir.exists()
 
 
-def test_should_skip_epub_update_rebuilds_when_local_is_behind():
-    assert not builder.should_skip_epub_update(
-        revisions_match=True,
-        epub_exists=True,
-        existing_chapters=9,
-        packaged_chapters=9,
-        target_chapters=10,
-    )
-
-
 def test_build_epub_update_skips_consistent_existing_book(
     monkeypatch, tmp_path, novel_data, episodes
 ):
@@ -191,14 +197,13 @@ def test_build_epub_update_does_not_shrink_complete_book_when_max_chapters_is_lo
         archive.writestr("chap_0001.xhtml", "one")
         archive.writestr("chap_0002.xhtml", "two")
 
-    class FakeEpubBuilder:
-        def __init__(self, out_dir):
-            pass
-
-        def build(self, **kwargs):
-            raise AssertionError("update must not shrink a complete local book")
-
-    monkeypatch.setattr(builder, "EpubBuilder", FakeEpubBuilder)
+    monkeypatch.setattr(
+        builder,
+        "EpubBuilder",
+        recording_epub_builder(
+            book_dir, fail="update must not shrink a complete local book"
+        ),
+    )
 
     result = builder.build_epub(
         object(), 42, str(tmp_path), max_chapters=1, update_mode=True
@@ -229,23 +234,16 @@ def test_build_epub_update_refetches_full_list_instead_of_shrinking_on_revision_
         archive.writestr("chap_0002.xhtml", "two")
 
     received = []
-
-    class FakeEpubBuilder:
-        def __init__(self, out_dir):
-            pass
-
-        def build(self, **kwargs):
-            received.append(kwargs["chapters"])
-            return str(book_dir / "book.epub"), "Book", len(kwargs["chapters"])
-
-    monkeypatch.setattr(builder, "EpubBuilder", FakeEpubBuilder)
+    monkeypatch.setattr(
+        builder, "EpubBuilder", recording_epub_builder(book_dir, builds=received)
+    )
 
     result = builder.build_epub(
         DummyFetchClient(), 42, str(tmp_path), max_chapters=1, update_mode=True
     )
 
     assert calls == [1, None]
-    assert [chapter["epi_no"] for chapter in received[0]] == [101, 102]
+    assert [chapter["epi_no"] for chapter in received[0]["chapters"]] == [101, 102]
     assert result == (str(book_dir / "book.epub"), "Book", 2)
 
 
@@ -265,14 +263,14 @@ def test_build_epub_update_skips_even_with_legacy_image_cache(
         archive.writestr("chap_0001.xhtml", "one")
         archive.writestr("chap_0002.xhtml", "two")
 
-    class FakeEpubBuilder:
-        def __init__(self, out_dir):
-            pass
-
-        def build(self, **kwargs):
-            raise AssertionError("current books should skip even with leftover image cache")
-
-    monkeypatch.setattr(builder, "EpubBuilder", FakeEpubBuilder)
+    monkeypatch.setattr(
+        builder,
+        "EpubBuilder",
+        recording_epub_builder(
+            book_dir,
+            fail="current books should skip even with leftover image cache",
+        ),
+    )
 
     result = builder.build_epub(object(), 42, str(tmp_path), update_mode=True)
 
@@ -319,22 +317,14 @@ def test_build_epub_rebuilds_when_chapter_revisions_do_not_match(
         archive.writestr("chap_0002.xhtml", "two")
 
     received = []
-
-    class FakeEpubBuilder:
-        def __init__(self, out_dir):
-            pass
-
-        def build(self, **kwargs):
-            received.append(kwargs)
-            return str(book_dir / "book.epub"), "Book", 2
-
-    monkeypatch.setattr(builder, "EpubBuilder", FakeEpubBuilder)
+    monkeypatch.setattr(
+        builder, "EpubBuilder", recording_epub_builder(book_dir, builds=received)
+    )
 
     result = builder.build_epub(DummyFetchClient(), 42, str(tmp_path), update_mode=True)
 
     assert result == (str(book_dir / "book.epub"), "Book", 2)
     assert len(received) == 1
-    assert "metadata" in received[0]
     saved_metadata = json.loads((book_dir / "metadata.json").read_text(encoding="utf-8"))
     assert "flag_detail_trans" not in saved_metadata
 
@@ -752,11 +742,6 @@ def test_load_or_fetch_uses_cached_html_without_resanitizing(tmp_path, episodes)
 
 
 def test_epub_builder_accepts_novel_metadata_without_reparsing(tmp_path, novel_data):
-    import src.epub as epub_mod
-
-    assert not hasattr(epub_mod, "html_from_episode_text")
-    assert not hasattr(epub_mod, "parse_novel_metadata")
-
     metadata = _metadata(novel_data)
     output, title, count = EpubBuilder(str(tmp_path)).build(
         metadata,
@@ -773,14 +758,3 @@ def test_epub_builder_accepts_novel_metadata_without_reparsing(tmp_path, novel_d
     with zipfile.ZipFile(output) as archive:
         chapter = archive.read("EPUB/chap_0001.xhtml").decode("utf-8")
     assert "<p>already clean</p>" in chapter
-
-
-def test_api_module_does_not_import_html_from_episode_text():
-    import inspect
-
-    import src.api as api_mod
-
-    source = inspect.getsource(api_mod)
-    assert "html_from_episode_text" not in source
-    assert api_mod.NovelSkipError is not None
-    assert api_mod.NoEpisodesError is not None

@@ -1,6 +1,5 @@
 import threading
 import time
-from types import SimpleNamespace
 
 import pytest
 
@@ -8,10 +7,11 @@ from src import api
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, body=None, headers=None):
+    def __init__(self, status_code=200, body=None, headers=None, content=b""):
         self.status_code = status_code
         self._body = body or {}
         self.headers = headers or {}
+        self.content = content
 
     def json(self):
         return self._body
@@ -31,6 +31,26 @@ class FakeSession:
         self.calls.append((method, url, kwargs))
         return next(self.responses)
 
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return next(self.responses)
+
+
+def make_api_client(*, session=None, cancel_event=None, login_at="login", real_sleep=False):
+    """Stub a client without opening a curl_cffi Session."""
+    client = object.__new__(api.NovelpiaClient)
+    client.cancel_event = cancel_event
+    if not real_sleep:
+        client.sleep_cooperative = lambda seconds: None
+    client.s = object() if session is None else session
+    client.timeout = 30
+    client.throttle = 1.5
+    client.tokens = api.Tokens(login_at=login_at)
+    client.email = None
+    client.password = None
+    client._auth_lock = threading.RLock()
+    return client
+
 
 def _ticket_block_body(code, errmsg, novel_no, episode_no):
     return {
@@ -48,11 +68,8 @@ def _ticket_block_body(code, errmsg, novel_no, episode_no):
 
 
 def _client_with_session(session):
-    client = make_client_without_init()
-    client.s = session
-    client.timeout = 30
+    client = make_api_client(session=session)
     client.throttle = 0
-    client.tokens = api.Tokens(login_at="login")
     client.refresh = lambda: pytest.fail("refresh should not run")
     client.login = lambda: pytest.fail("login should not run")
     client._on_rate_limit = lambda: None
@@ -150,13 +167,7 @@ def test_episode_ticket_unknown_500_still_retries(monkeypatch):
 
 
 def test_novel_maps_server_error_to_unavailable_novel(monkeypatch):
-    client = make_client_without_init()
-    client.s = object()
-    client.timeout = 30
-    client.tokens = api.Tokens(login_at="login")
-    client.refresh = lambda: None
-    client.login = lambda: None
-    client._on_rate_limit = lambda: None
+    client = make_api_client()
     monkeypatch.setattr(
         api,
         "request_with_retries",
@@ -185,10 +196,7 @@ def test_api_request_injects_shared_auth_kwargs():
         FakeResponse(401),
         FakeResponse(200, {"ok": True}),
     ])
-    client = make_client_without_init()
-    client.s = session
-    client.timeout = 30
-    client.tokens = api.Tokens(login_at="old-login")
+    client = make_api_client(session=session, login_at="old-login")
     refreshes = []
 
     def refresh():
@@ -197,8 +205,6 @@ def test_api_request_injects_shared_auth_kwargs():
 
     client.refresh = refresh
     client.login = lambda: pytest.fail("login should not run")
-    client._on_rate_limit = lambda: None
-    client.cancel_event = None
 
     response = client._api_request("GET", "https://example.test/v1/login/me")
 
@@ -226,13 +232,7 @@ def test_episode_list_maps_missing_episodes_to_no_episodes_error(monkeypatch):
     assert api._response_indicates_missing_episodes(response)
     assert not api._response_indicates_missing_novel(response)
 
-    client = make_client_without_init()
-    client.s = object()
-    client.timeout = 30
-    client.tokens = api.Tokens(login_at="login")
-    client.refresh = lambda: None
-    client.login = lambda: None
-    client._on_rate_limit = lambda: None
+    client = make_api_client()
     monkeypatch.setattr(
         api,
         "request_with_retries",
@@ -365,11 +365,7 @@ def test_request_recovers_expired_auth():
 
 
 def test_refresh_keeps_in_memory_token_when_persistence_fails(monkeypatch, caplog):
-    client = make_client_without_init()
-    client._auth_lock = threading.RLock()
-    client.s = object()
-    client.timeout = 30
-    client.tokens = api.Tokens(login_at="old-token")
+    client = make_api_client(login_at="old-token")
     monkeypatch.setattr(
         api,
         "request_with_retries",
@@ -401,11 +397,7 @@ def test_refresh_keeps_in_memory_token_when_persistence_fails(monkeypatch, caplo
 def test_login_and_refresh_reject_malformed_authentication_payloads(
     monkeypatch, method_name, body
 ):
-    client = make_client_without_init()
-    client._auth_lock = threading.RLock()
-    client.s = object()
-    client.timeout = 30
-    client.tokens = api.Tokens(login_at="old-token")
+    client = make_api_client(login_at="old-token")
     client.email = "user@example.test"
     client.password = "pw"
     saves = []
@@ -465,8 +457,7 @@ def test_request_honors_pre_cancelled_event():
 def test_sleep_cooperative_raises_when_cancelled():
     event = threading.Event()
     event.set()
-    client = object.__new__(api.NovelpiaClient)
-    client.cancel_event = event
+    client = make_api_client(cancel_event=event, real_sleep=True)
 
     with pytest.raises(api.DownloadCancelled, match="cancelled during wait"):
         client.sleep_cooperative(0)
@@ -474,21 +465,8 @@ def test_sleep_cooperative_raises_when_cancelled():
         client.sleep_cooperative(5)
 
 
-def make_client_without_init():
-    client = object.__new__(api.NovelpiaClient)
-    client.cancel_event = None
-    client.sleep_cooperative = lambda seconds: None
-    return client
-
-
 def test_recent_novels_filters_k_premium_and_preserves_api_order(monkeypatch):
-    client = make_client_without_init()
-    client.s = object()
-    client.timeout = 30
-    client.tokens = api.Tokens(login_at="login")
-    client.refresh = lambda: None
-    client.login = lambda: None
-    client._on_rate_limit = lambda: None
+    client = make_api_client()
     response = FakeResponse(200, {
         "result": {"list": [
             {"novel": {"novel_no": 40, "novel_locale": "ko"}},
@@ -513,19 +491,13 @@ def test_recent_novels_filters_k_premium_and_preserves_api_order(monkeypatch):
 
 
 def test_recent_novels_rejects_invalid_row_count():
-    client = make_client_without_init()
+    client = make_api_client()
     with pytest.raises(ValueError, match="at least 1"):
         client.recent_novels(0)
 
 
 def test_recent_novels_handles_unexpected_response_shape(monkeypatch):
-    client = make_client_without_init()
-    client.s = object()
-    client.timeout = 30
-    client.tokens = api.Tokens()
-    client.refresh = lambda: None
-    client.login = lambda: None
-    client._on_rate_limit = lambda: None
+    client = make_api_client(login_at=None)
     monkeypatch.setattr(
         api,
         "request_with_retries",
@@ -538,8 +510,7 @@ def test_recent_novels_handles_unexpected_response_shape(monkeypatch):
 def test_my_library_raises_when_cancelled(monkeypatch):
     event = threading.Event()
     event.set()
-    client = make_client_without_init()
-    client.cancel_event = event
+    client = make_api_client(cancel_event=event)
     monkeypatch.setattr(
         api,
         "request_with_retries",
@@ -552,14 +523,7 @@ def test_my_library_raises_when_cancelled(monkeypatch):
 
 def test_my_library_does_not_return_partial_ids_on_cancel(monkeypatch):
     event = threading.Event()
-    client = object.__new__(api.NovelpiaClient)
-    client.cancel_event = event
-    client.s = object()
-    client.timeout = 30
-    client.tokens = api.Tokens(login_at="login")
-    client.refresh = lambda: None
-    client.login = lambda: None
-    client._on_rate_limit = lambda: None
+    client = make_api_client(cancel_event=event, real_sleep=True)
     full_page = {
         "result": {"list": [{"novel": {"novel_no": idx}} for idx in range(1, 101)]}
     }
@@ -575,13 +539,7 @@ def test_my_library_does_not_return_partial_ids_on_cancel(monkeypatch):
 
 
 def test_my_library_skips_malformed_rows_and_preserves_order(monkeypatch):
-    client = make_client_without_init()
-    client.s = object()
-    client.timeout = 30
-    client.tokens = api.Tokens(login_at="login")
-    client.refresh = lambda: None
-    client.login = lambda: None
-    client._on_rate_limit = lambda: None
+    client = make_api_client()
     monkeypatch.setattr(
         api,
         "request_with_retries",
@@ -606,13 +564,7 @@ def test_my_library_skips_malformed_rows_and_preserves_order(monkeypatch):
 
 
 def test_my_library_returns_empty_on_unexpected_response_shape(monkeypatch):
-    client = make_client_without_init()
-    client.s = object()
-    client.timeout = 30
-    client.tokens = api.Tokens()
-    client.refresh = lambda: None
-    client.login = lambda: None
-    client._on_rate_limit = lambda: None
+    client = make_api_client(login_at=None)
     monkeypatch.setattr(
         api,
         "request_with_retries",
@@ -624,7 +576,7 @@ def test_my_library_returns_empty_on_unexpected_response_shape(monkeypatch):
 
 def test_fetch_episode_matches_captured_ticket_and_split_content_shapes(captured_api_samples):
     episode = captured_api_samples["episode"]
-    client = make_client_without_init()
+    client = make_api_client()
     client.episode_ticket = lambda epi_no: episode["ticket_payload"]
     client.episode_content = lambda token: episode["content_payload"]
 
@@ -641,7 +593,7 @@ def test_fetch_episode_matches_captured_ticket_and_split_content_shapes(captured
 
 
 def test_fetch_episode_reports_missing_number_and_empty_content():
-    client = make_client_without_init()
+    client = make_api_client()
     assert client.fetch_episode({"epi_num": 1})["error"] == "missing episode_no"
     client.episode_ticket = lambda epi_no: {"result": {"token": "token"}}
     client.episode_content = lambda token: {"result": {"data": {}}}
@@ -649,7 +601,7 @@ def test_fetch_episode_reports_missing_number_and_empty_content():
 
 
 def test_fetch_episode_keeps_non_cancel_errors_chapter_scoped():
-    client = make_client_without_init()
+    client = make_api_client()
     client.episode_ticket = lambda epi_no: (_ for _ in ()).throw(ValueError("bad ticket"))
     assert client.fetch_episode({"episode_no": 12, "epi_title": "Prologue"}) == {
         "error": "bad ticket",
@@ -665,7 +617,7 @@ def test_fetch_episode_keeps_non_cancel_errors_chapter_scoped():
 
 
 def test_fetch_episode_maps_ad_block_to_chapter_error_dict():
-    client = make_client_without_init()
+    client = make_api_client()
     content_calls = []
     client.episode_ticket = lambda epi_no: (_ for _ in ()).throw(
         api.TicketAccessError("ad-gated episode")
@@ -763,7 +715,7 @@ def test_fetch_episode_cancel_during_remint_wait_raises():
 
 
 def test_parallel_fetch_preserves_input_order_and_reports_progress():
-    client = make_client_without_init()
+    client = make_api_client()
     client.fetch_episode = lambda episode, idx: {"epi_title": episode["epi_title"], "idx": idx}
     progress = []
     completed = []
@@ -810,7 +762,7 @@ def test_one_worker_rate_limit_wait_does_not_block_another_worker(monkeypatch):
         assert release_rate_limited_worker.wait(1.0)
 
     session = ConcurrentSession()
-    client = make_client_without_init()
+    client = make_api_client()
 
     def fetch_episode(episode, idx):
         response = api.request_with_retries(
@@ -842,7 +794,7 @@ def test_one_worker_rate_limit_wait_does_not_block_another_worker(monkeypatch):
 
 
 def test_parallel_fetch_rejects_invalid_worker_count():
-    client = make_client_without_init()
+    client = make_api_client()
     with pytest.raises(ValueError, match="at least 1"):
         client.fetch_episodes_parallel([], max_workers=0)
 
@@ -850,7 +802,7 @@ def test_parallel_fetch_rejects_invalid_worker_count():
 def test_parallel_fetch_does_not_submit_when_already_cancelled():
     event = threading.Event()
     event.set()
-    client = make_client_without_init()
+    client = make_api_client()
     client.cancel_event = event
     client.fetch_episode = lambda *args, **kwargs: pytest.fail(
         "fetch_episode should not run when cancel is already set"
@@ -870,7 +822,7 @@ def test_parallel_fetch_does_not_submit_when_already_cancelled():
 
 def test_parallel_fetch_stores_completed_chapter_before_honoring_cancel():
     event = threading.Event()
-    client = make_client_without_init()
+    client = make_api_client()
     client.cancel_event = event
     completed = []
 
@@ -896,7 +848,7 @@ def test_parallel_fetch_stores_completed_chapter_before_honoring_cancel():
 
 
 def test_parallel_fetch_stores_finished_chapter_when_sibling_raises_cancel():
-    client = make_client_without_init()
+    client = make_api_client()
     completed = []
     html_done = threading.Event()
 
@@ -922,37 +874,8 @@ def test_parallel_fetch_stores_finished_chapter_when_sibling_raises_cancel():
     assert stored_ok[0]["html"] == "ok"
 
 
-class FakeImageResponse:
-    def __init__(self, status_code=200, content=b""):
-        self.status_code = status_code
-        self.content = content
-        self.headers = {}
-
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            raise RuntimeError(f"HTTP {self.status_code}")
-
-
-class FakeImageSession:
-    def __init__(self, responses):
-        self.responses = list(responses)
-        self.cookies = {}
-        self.calls = []
-
-    def get(self, url, **kwargs):
-        self.calls.append((url, kwargs))
-        return self.responses.pop(0)
-
-
-def _image_client(session):
-    client = make_client_without_init()
-    client.timeout = 30
-    client.s = session
-    return client
-
-
 def test_fetch_image_reraises_cancellation_during_signed_key_refresh():
-    client = _image_client(FakeImageSession([FakeImageResponse(403)]))
+    client = make_api_client(session=FakeSession([FakeResponse(403)]))
     client.cancel_event = threading.Event()
 
     def cancelled_signed_key(episode_no):
@@ -970,7 +893,7 @@ def test_fetch_image_reraises_cancellation_during_signed_key_refresh():
 
 
 def test_fetch_image_keeps_renewal_failure_when_signed_key_refresh_fails(caplog):
-    client = _image_client(FakeImageSession([FakeImageResponse(403)]))
+    client = make_api_client(session=FakeSession([FakeResponse(403)]))
 
     def failing_signed_key(episode_no):
         raise RuntimeError("ticket failed")

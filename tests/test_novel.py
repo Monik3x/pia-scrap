@@ -1,3 +1,4 @@
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,7 @@ from src.novel import (
     fetch_novel_and_episodes,
     html_from_episode_text,
     parse_novel_metadata,
+    user_subscription_status,
 )
 
 
@@ -237,3 +239,57 @@ def test_fetch_novel_and_episodes_rejects_all_webtoon_episode_list(novel_data):
 
     with pytest.raises(NoEpisodesError, match="has no downloadable episodes"):
         fetch_novel_and_episodes(client, 42)
+
+
+def test_user_subscription_status_paid_free_unknown():
+    assert user_subscription_status({
+        "result": {"subscription": {}, "login": {"mem_plus_type": 0}},
+    }) == "paid"
+    assert user_subscription_status({
+        "result": {"login": {"mem_plus_type": 0}},
+    }) == "free"
+    assert user_subscription_status({
+        "result": {"login": {"mem_plus_type": 1}},
+    }) == "paid"
+    assert user_subscription_status({
+        "result": {"login": {"mem_plus_type": "0"}},
+    }) == "free"
+    assert user_subscription_status({}) == "unknown"
+    assert user_subscription_status(None) == "unknown"
+    assert user_subscription_status({"result": {}}) == "unknown"
+
+
+def test_fetch_novel_and_episodes_logs_account_and_counts(novel_data, caplog):
+    novel_payload = {
+        "result": {
+            "novel": novel_data["result"]["novel"],
+            "info": {"epi_cnt": 2, "ad_epi_cnt": 4, "premium_epi_cnt": 10},
+            "writer_list": novel_data["result"]["writer_list"],
+            "tag_list": novel_data["result"]["tag_list"],
+        }
+    }
+    episode_payload = {
+        "result": {
+            "list": [
+                {
+                    "episode_no": 1,
+                    "epi_title": "One",
+                    "flag_content": 0,
+                    "flag_type": 1,
+                }
+            ]
+        }
+    }
+    client = SimpleNamespace(
+        me=lambda: {
+            "result": {"login": {"mem_nick": "tester", "mem_plus_type": 0}},
+        },
+        novel=lambda novel_id: novel_payload,
+        episode_list=lambda novel_id, rows: episode_payload,
+    )
+
+    with caplog.at_level(logging.INFO, logger="pia_scrap"):
+        fetch_novel_and_episodes(client, 42)
+
+    assert "account=free nick='tester'" in caplog.text
+    assert "ad=4 premium=10" in caplog.text

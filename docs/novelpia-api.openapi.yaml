@@ -85,7 +85,9 @@ paths:
       tags: [Authentication]
       operationId: getCurrentMember
       summary: Get the current authenticated member
-      description: The project uses this call as an authentication check. Its result schema is not captured.
+      description: |
+        Subscription present means paid. Otherwise `mem_plus_type != 0` is paid
+        and `0` is free. pia-scrap also uses this call as an authentication check.
       security:
         - loginAt: []
           userKey: []
@@ -93,11 +95,11 @@ paths:
           lastLogin: []
       responses:
         '200':
-          description: Current-member envelope; `result` is intentionally unspecified.
+          description: Current-member envelope.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/UnknownResultEnvelope'
+                $ref: '#/components/schemas/MeResultEnvelope'
         '401': {$ref: '#/components/responses/ErrorResponse'}
         '403': {$ref: '#/components/responses/ErrorResponse'}
         '429': {$ref: '#/components/responses/RateLimited'}
@@ -406,6 +408,29 @@ components:
           properties:
             result: {}
           additionalProperties: true
+    MeResultEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            result:
+              type: object
+              properties:
+                subscription:
+                  type: object
+                  nullable: true
+                  additionalProperties: true
+                login:
+                  type: object
+                  properties:
+                    mem_plus_type:
+                      oneOf:
+                        - {type: integer}
+                        - {type: string, pattern: '^[0-9]+$'}
+                    mem_nick: {type: string}
+                  additionalProperties: true
+              additionalProperties: true
+          additionalProperties: true
     LoginRequest:
       type: object
       required: [email, passwd]
@@ -448,6 +473,7 @@ components:
       additionalProperties: true
     NovelEpisodeCounts:
       type: object
+      description: Informational counts. Ticket 500s are the access check.
       properties:
         epi_cnt: {type: integer, minimum: 0}
         free_epi_cnt: {type: integer, minimum: 0}

@@ -60,6 +60,33 @@ class NovelMetadata:
     tags: List[str]
 
 
+def user_subscription_status(me_response: Any) -> str:
+    if not isinstance(me_response, dict):
+        return "unknown"
+    result = me_response.get("result")
+    if not isinstance(result, dict):
+        return "unknown"
+    login = result.get("login")
+    if not isinstance(login, dict):
+        return "unknown"
+    if result.get("subscription") is not None:
+        return "paid"
+    plus_type = login.get("mem_plus_type")
+    if isinstance(plus_type, int):
+        return "paid" if plus_type != 0 else "free"
+    if isinstance(plus_type, str) and plus_type.isdecimal():
+        return "paid" if int(plus_type) != 0 else "free"
+    return "unknown"
+
+
+def _info_count(info: Any, key: str) -> int:
+    raw = info.get(key) if isinstance(info, dict) else None
+    try:
+        return max(0, int(raw or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _is_webtoon_episode(episode: Any) -> bool:
     """Return whether an episode-list entry is a webtoon without prose content."""
     if not isinstance(episode, dict):
@@ -196,10 +223,35 @@ def fetch_novel_and_episodes(
     except NoMetadataError as exc:
         raise NoMetadataError(f"Novel {novel_id} returned no metadata.") from exc
 
+    info = (data_novel.get("result") or {}).get("info") if isinstance(data_novel, dict) else None
+    ad_cnt = _info_count(info, "ad_epi_cnt")
+    premium_cnt = _info_count(info, "premium_epi_cnt")
     logger.info(
         f"title='{metadata.title}' author='{metadata.author}' "
-        f"chapter={metadata.episode_count} status={metadata.status}"
+        f"chapter={metadata.episode_count} status={metadata.status} "
+        f"ad={ad_cnt} premium={premium_cnt}"
     )
+
+    try:
+        me_payload = client.me()
+    except Exception:
+        logger.warning("could not read account status")
+        status = "unknown"
+        nick = None
+    else:
+        status = user_subscription_status(me_payload)
+        login = (
+            (me_payload.get("result") or {}).get("login")
+            if isinstance(me_payload, dict)
+            else None
+        )
+        raw_nick = login.get("mem_nick") if isinstance(login, dict) else None
+        nick = raw_nick.strip() if isinstance(raw_nick, str) and raw_nick.strip() else None
+
+    if nick:
+        logger.info(f"account={status} nick='{nick}'")
+    else:
+        logger.info(f"account={status}")
 
     if metadata.episode_count == 0:
         raise NoEpisodesError(f"Novel {novel_id} has no downloadable episodes.")
