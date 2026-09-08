@@ -208,8 +208,5 @@ __marimo__/
 
 output/
 .api.json
-src/__init__.py
-AGENTS.md
-pytest.ini
-tests/
-docs/
+episodecontent*.json
+docs/sample_api_responses/
