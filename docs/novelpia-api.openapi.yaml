@@ -276,7 +276,9 @@ paths:
         The response can split chapter HTML across `epi_content`, `epi_content2`,
         `epi_content3`, and further numerically suffixed fields. Consumers should
         concatenate the base field first and suffixed fields in numeric order.
-        `writer_comment` is separate and is not chapter content.
+        `writer_comment` is separate and is not chapter content. The observed
+        client does not send `login-at`; a 403 means `_t` expired and the caller
+        remints via `/v1/novel/episode`.
       security:
         - userKey: []
           tKey: []

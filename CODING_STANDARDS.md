@@ -13,7 +13,7 @@ Cancel by calling `sleep_cooperative` and letting `DownloadCancelled` propagate.
 ## Chapter results
 
 Chapter failures stay error dicts. Cancel raises.
-Ad-gated (ticket 0008) and premium (ticket 0009) denials are chapter error dicts, not NovelSkipError.
+Ad-gated (ticket 0008) and premium (ticket 0009) denials are chapter error dicts, not NovelSkipError. A content 403 remints `_t` via episode_ticket; do not refresh login_at for that status.
 
 Expected novel skips raise `NovelSkipError` or a subclass. Other exceptions are hard failures with a traceback.
 

@@ -40,6 +40,10 @@ class TicketAccessError(RuntimeError):
     """Chapter-scoped ticket denial (0008/0009); do not skip the whole novel."""
 
 
+CONTENT_FETCH_ATTEMPTS = 3
+CONTENT_REMINT_WAIT_SECONDS = 1.0
+
+
 @dataclass
 class Tokens:
     login_at: Optional[str] = None
@@ -381,9 +385,13 @@ class NovelpiaClient:
         if self.throttle:
             self.sleep_cooperative(random.uniform(self.throttle * 0.5, self.throttle))
 
+        # Content auth is cookies plus _t; a 403 is a dead ticket, not a dead session.
         r = self._api_request(
-            "GET", url, params={"_t": token_t}, max_retries=3
+            "GET", url, headers={}, params={"_t": token_t},
+            max_retries=3, allow_refresh=False,
         )
+        if r.status_code == 403:
+            raise RuntimeError("content ticket rejected")
         r.raise_for_status()
         return r.json()
 
@@ -405,18 +413,37 @@ class NovelpiaClient:
             epi_no = int(episode_no)
 
             logger.info(f"ticket for episode {ep.get('epi_num', idx)} - {epi_title}")
-            tdata = self.episode_ticket(epi_no)
+            cdata = None
+            signed_key = {}
+            for attempt in range(1, CONTENT_FETCH_ATTEMPTS + 1):
+                tdata = self.episode_ticket(epi_no)
 
-            token_t = extract_t_token(tdata)
-            res_block = tdata.get("result") or {}
-            signed_key = res_block.get("signed_key", {}) if isinstance(res_block, dict) else {}
-            if not isinstance(signed_key, dict):
-                signed_key = {}
+                token_t = extract_t_token(tdata)
+                res_block = tdata.get("result") or {}
+                signed_key = res_block.get("signed_key", {}) if isinstance(res_block, dict) else {}
+                if not isinstance(signed_key, dict):
+                    signed_key = {}
 
-            if not token_t:
-                return {"error": "no token found", "epi_no": epi_no, "epi_title": epi_title}
+                if not token_t:
+                    return {"error": "no token found", "epi_no": epi_no, "epi_title": epi_title}
 
-            cdata = self.episode_content(token_t)
+                try:
+                    cdata = self.episode_content(token_t)
+                    break
+                except (DownloadCancelled, KeyboardInterrupt):
+                    raise
+                except Exception as e:
+                    if str(e) == "content ticket rejected" and attempt < CONTENT_FETCH_ATTEMPTS:
+                        logger.warning(
+                            f"content 403 for episode {epi_no}; reminting ticket "
+                            f"({attempt}/{CONTENT_FETCH_ATTEMPTS})"
+                        )
+                        self.sleep_cooperative(CONTENT_REMINT_WAIT_SECONDS)
+                        continue
+                    return {"error": str(e), "epi_no": epi_no, "epi_title": epi_title}
+
+            if cdata is None:
+                return {"error": "content ticket rejected", "epi_no": epi_no, "epi_title": epi_title}
 
             result_block = cdata.get("result", {})
             data_block = result_block.get("data", {}) if isinstance(result_block, dict) else {}
@@ -450,6 +477,7 @@ class NovelpiaClient:
                     "epi_title": epi_title,
                 }
 
+            # Raw joined HTML; builder sanitizes once at fetch-complete.
             return {
                 "html": html_text,
                 "epi_title": epi_title,

@@ -682,6 +682,86 @@ def test_fetch_episode_maps_ad_block_to_chapter_error_dict():
     assert content_calls == []
 
 
+def test_episode_content_omits_login_at_and_skips_auth_recovery():
+    session = FakeSession([
+        FakeResponse(401, {"errmsg": "unauthorized"}),
+        FakeResponse(200, {"result": {"data": {"epi_content": "<p>ok</p>"}}}),
+    ])
+    client = _client_with_session(session)
+
+    with pytest.raises(RuntimeError, match="HTTP 401"):
+        client.episode_content("fixture-token")
+
+    assert len(session.calls) == 1
+    kwargs = session.calls[0][2]
+    assert "login-at" not in kwargs["headers"]
+    assert kwargs["params"]["_t"] == "fixture-token"
+    assert "USERKEY=u" in kwargs["headers"]["Cookie"]
+
+
+def test_fetch_episode_remints_ticket_on_content_403():
+    ticket = {"result": {"token": "fixture-token", "signed_key": {}}}
+    content_ok = {"result": {"data": {"epi_content": "<p>ok</p>"}}}
+    session = FakeSession([
+        FakeResponse(200, ticket),
+        FakeResponse(403),
+        FakeResponse(200, ticket),
+        FakeResponse(200, content_ok),
+    ])
+    client = _client_with_session(session)
+    sleeps = []
+    client.sleep_cooperative = lambda seconds: sleeps.append(seconds)
+
+    result = client.fetch_episode({"episode_no": 2407, "epi_title": "Prologue"})
+
+    assert result["html"] == "<p>ok</p>"
+    assert result["epi_no"] == 2407
+    assert [call[0] for call in session.calls] == ["GET", "GET", "GET", "GET"]
+    assert session.calls[0][1].endswith("/v1/novel/episode")
+    assert session.calls[1][1].endswith("/v1/novel/episode/content")
+    assert session.calls[2][1].endswith("/v1/novel/episode")
+    assert session.calls[3][1].endswith("/v1/novel/episode/content")
+    assert 1.0 in sleeps
+
+
+def test_fetch_episode_gives_up_after_three_content_403s():
+    ticket = {"result": {"token": "fixture-token"}}
+    session = FakeSession([
+        FakeResponse(200, ticket), FakeResponse(403),
+        FakeResponse(200, ticket), FakeResponse(403),
+        FakeResponse(200, ticket), FakeResponse(403),
+        FakeResponse(200, ticket), FakeResponse(200, {"result": {"data": {"epi_content": "<p>late</p>"}}}),
+    ])
+    client = _client_with_session(session)
+
+    result = client.fetch_episode({"episode_no": 2407, "epi_title": "Prologue"})
+
+    assert result == {
+        "error": "content ticket rejected",
+        "epi_no": 2407,
+        "epi_title": "Prologue",
+    }
+    assert len(session.calls) == 6
+
+
+def test_fetch_episode_cancel_during_remint_wait_raises():
+    ticket = {"result": {"token": "fixture-token"}}
+    session = FakeSession([
+        FakeResponse(200, ticket),
+        FakeResponse(403),
+    ])
+    client = _client_with_session(session)
+
+    def sleep(seconds):
+        if seconds == api.CONTENT_REMINT_WAIT_SECONDS:
+            raise api.DownloadCancelled("cancelled during remint")
+
+    client.sleep_cooperative = sleep
+
+    with pytest.raises(api.DownloadCancelled):
+        client.fetch_episode({"episode_no": 2407, "epi_title": "Prologue"})
+
+
 def test_parallel_fetch_preserves_input_order_and_reports_progress():
     client = make_client_without_init()
     client.fetch_episode = lambda episode, idx: {"epi_title": episode["epi_title"], "idx": idx}
