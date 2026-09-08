@@ -96,14 +96,15 @@ Files are written to `output/<title>/`:
 
 ```text
 output/<title>/<title>.epub
-output/<title>/<episode-title>.txt   # if --txt is used
-output/<title>/.raw_cache/           # episode JSON if --update is used
+output/<title>/<episode-title>.txt          # if --txt is used
+output/<title>/.raw_cache/                  # episode JSON if --update is used
 output/<title>/.raw_cache/image_index.json  # URL to content-hash map for EPUB image reuse
-output/<title>/chapters.jsonl        # chapter URLs and per-episode revision markers
-output/last_run_report.txt           # end-of-run failure/warning recap (overwritten each queue)
+output/<title>/chapters.jsonl               # chapter URLs and per-episode revision markers
+output/last_run_report.txt                  # end-of-run failure/warning recap (overwritten each queue)
 ```
 
 After a queue finishes, CLI and GUI both show a short run recap: failed or skipped novel IDs with reasons, plus intra-novel warnings captured during the run (for example dropped images). If the queue is cancelled, the recap says it was interrupted and names any in-progress novel. The same text is written to `last_run_report.txt` under the output directory so an overnight run is still reviewable after the window is closed.
+
 ---
 
 ## Quick Notes

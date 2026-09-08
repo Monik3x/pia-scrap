@@ -23,9 +23,9 @@ only. Tokens do not appear in source, logs, fixtures, issues, or agent docs.
 
 ## Pointers
 
-- `CODING_STANDARDS.md`: review; change CLI/GUI options; touch auth, cache,
-  book identity, cancel, recap, image hosts, or API contracts; add tests;
-  first `git add` of `docs/` or `tests/`
+- `CODING_STANDARDS.md`: review; write comments; change CLI/GUI options; touch
+  auth, cache, book identity, cancel, recap, image hosts, or API contracts;
+  add tests; first `git add` of `docs/` or `tests/`
 - `tests/conftest.py`, `tests/test_api.py`: add tests. `FakeSession` lives in
   `test_api.py` and `test_epub_security.py`, not conftest.
 - `docs/novelpia-api.openapi.yaml`: change request or response shapes in

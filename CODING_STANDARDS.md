@@ -2,6 +2,8 @@
 
 Apply every rule below when reviewing.
 
+A note next to code is a comment when deleting that code would make the note meaningless. A rule an agent could break in `gui.py` without opening the implementation file belongs here. Write both when the rule is project-wide and easy to miss at one site.
+
 ## Cancel
 
 Cancel by calling `sleep_cooperative` and letting `DownloadCancelled` propagate. Check the event before starting a novel or submitting pool work.

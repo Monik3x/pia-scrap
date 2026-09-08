@@ -274,6 +274,7 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
                 existing_chapters = None
                 logger.warning(f"Ignoring invalid update metadata {meta_path}: {exc}")
 
+        # First fetch already sliced; refetch uncapped so a lower max_chapters does not shrink the stored book.
         if (
             existing_chapters is not None
             and max_chapters
