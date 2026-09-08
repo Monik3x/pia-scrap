@@ -8,7 +8,7 @@ from curl_cffi import requests
 import concurrent.futures
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Callable
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 from src import const
 from src.helper import (
@@ -34,6 +34,10 @@ class NovelUnavailableError(NovelSkipError):
     """The requested novel ID is not assigned or is unavailable."""
 
     result_status = "not_exist"
+
+
+class TicketAccessError(RuntimeError):
+    """Chapter-scoped ticket denial (0008/0009); do not skip the whole novel."""
 
 
 @dataclass
@@ -245,6 +249,10 @@ class NovelpiaClient:
         r = self._api_request(
             "GET", url, headers=headers, params=params, max_retries=4
         )
+        if _ad_episode_block(r):
+            raise TicketAccessError("ad-gated episode")
+        if _premium_episode_block(r):
+            raise TicketAccessError("premium episode blocked")
         r.raise_for_status()
         return r.json()
 
@@ -679,6 +687,48 @@ def _response_indicates_missing_episodes(response) -> bool:
     return has_missing_message and has_novel_error_marker
 
 
+def _int_or_decimal(value: Any) -> Optional[int]:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdecimal():
+        return int(value)
+    return None
+
+
+def _ticket_block_ids(result: Any) -> Optional[Tuple[int, int]]:
+    if not isinstance(result, dict):
+        return None
+    data = result.get("data")
+    if not isinstance(data, dict):
+        return None
+    episode_data = data.get("data")
+    if not isinstance(episode_data, dict):
+        return None
+    novel_no = _int_or_decimal(data.get("novel_no") or episode_data.get("novel_no"))
+    episode_no = _int_or_decimal(episode_data.get("episode_no"))
+    if novel_no is None or episode_no is None:
+        return None
+    return (novel_no, episode_no)
+
+
+def _ticket_block(response, code: str, errmsg: str) -> Optional[Tuple[int, int]]:
+    parsed = _server_error_messages(response)
+    if not parsed:
+        return None
+    body = parsed["body"]
+    if str(body.get("code") or "") != code or body.get("errmsg") != errmsg:
+        return None
+    return _ticket_block_ids(parsed["result"])
+
+
+def _ad_episode_block(response) -> Optional[Tuple[int, int]]:
+    return _ticket_block(response, "0008", "novel.ADVERTISEMENT_EPISODE")
+
+
+def _premium_episode_block(response) -> Optional[Tuple[int, int]]:
+    return _ticket_block(response, "0009", "novel.PREMIUM_EPISODE")
+
+
 def request_with_retries(session: requests.Session, method: str, url: str, *,
                           headers=None, params=None, json=None, data=None,
                           timeout=30, max_retries=3, backoff=1.25,
@@ -749,9 +799,13 @@ def request_with_retries(session: requests.Session, method: str, url: str, *,
                     _wait_for_retry(wait, cancel_event, "rate-limit wait")
                     continue
 
-            if response.status_code >= 500 and attempt < max_retries:
-                _wait_for_retry(backoff ** attempt, cancel_event, "server-error backoff")
-                continue
+            if response.status_code >= 500:
+                # 0008/0009 are access denials, not transient server errors.
+                if _ad_episode_block(response) or _premium_episode_block(response):
+                    return response
+                if attempt < max_retries:
+                    _wait_for_retry(backoff ** attempt, cancel_event, "server-error backoff")
+                    continue
 
             return response
         except requests.RequestsError as exc:

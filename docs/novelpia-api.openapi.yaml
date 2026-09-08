@@ -234,7 +234,8 @@ paths:
       description: |
         Returns episode/novel metadata, an opaque short-lived `_t` value, and signed
         CloudFront cookie values used for authorized episode images. Receiving a
-        ticket depends on the caller's legitimate access rights.
+        ticket depends on the caller's legitimate access rights. Live ad-gated and
+        premium denials use the HTTP 500 `TicketAccessDeniedEnvelope`, not 403.
       security:
         - loginAt: []
           userKey: []
@@ -254,11 +255,18 @@ paths:
                 $ref: '#/components/schemas/EpisodeTicketResponse'
         '401': {$ref: '#/components/responses/ErrorResponse'}
         '403':
-          description: Authentication failure or legitimate access restriction, such as subscription/purchase requirements.
+          description: Authentication failure.
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ErrorEnvelope'}
         '429': {$ref: '#/components/responses/RateLimited'}
+        '500':
+          description: >
+            Live ticket denial for ad-gated (0008) and premium (0009) episodes.
+            Not a transient server error.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TicketAccessDeniedEnvelope'}
   /v1/novel/episode/content:
     get:
       tags: [Episodes]
@@ -354,6 +362,40 @@ components:
           properties:
             error: {}
             result: {}
+          additionalProperties: true
+    TicketAccessId:
+      oneOf:
+        - {type: integer}
+        - {type: string, pattern: '^[0-9]+$'}
+    TicketAccessDeniedEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          required: [code, errmsg, result]
+          properties:
+            statusCode: {type: integer, example: 500}
+            code:
+              type: string
+              enum: ['0008', '0009']
+            errmsg:
+              type: string
+              enum: [novel.ADVERTISEMENT_EPISODE, novel.PREMIUM_EPISODE]
+            result:
+              type: object
+              properties:
+                name: {type: string, example: NOVEL_ERROR}
+                data:
+                  type: object
+                  properties:
+                    novel_no: {$ref: '#/components/schemas/TicketAccessId'}
+                    data:
+                      type: object
+                      properties:
+                        episode_no: {$ref: '#/components/schemas/TicketAccessId'}
+                        novel_no: {$ref: '#/components/schemas/TicketAccessId'}
+                      additionalProperties: true
+                  additionalProperties: true
+              additionalProperties: true
           additionalProperties: true
     UnknownResultEnvelope:
       allOf:

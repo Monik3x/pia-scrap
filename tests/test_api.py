@@ -32,6 +32,33 @@ class FakeSession:
         return next(self.responses)
 
 
+def _ticket_block_body(code, errmsg, novel_no, episode_no):
+    return {
+        "statusCode": 500,
+        "code": code,
+        "errmsg": errmsg,
+        "result": {
+            "name": "NOVEL_ERROR",
+            "data": {
+                "novel_no": novel_no,
+                "data": {"episode_no": episode_no, "novel_no": novel_no},
+            },
+        },
+    }
+
+
+def _client_with_session(session):
+    client = make_client_without_init()
+    client.s = session
+    client.timeout = 30
+    client.throttle = 0
+    client.tokens = api.Tokens(login_at="login")
+    client.refresh = lambda: pytest.fail("refresh should not run")
+    client.login = lambda: pytest.fail("login should not run")
+    client._on_rate_limit = lambda: None
+    return client
+
+
 def test_request_retries_server_errors(monkeypatch):
     session = FakeSession([FakeResponse(500), FakeResponse(200, {"ok": True})])
     waits = []
@@ -43,6 +70,83 @@ def test_request_retries_server_errors(monkeypatch):
     assert len(session.calls) == 2
     assert waits == ["server-error backoff"]
     assert "USERKEY=u" in session.calls[0][2]["headers"]["Cookie"]
+
+
+def test_request_returns_classified_ticket_500_without_backoff(monkeypatch):
+    body = _ticket_block_body("0008", "novel.ADVERTISEMENT_EPISODE", 23, 2407)
+    session = FakeSession([FakeResponse(500, body)])
+    waits = []
+    monkeypatch.setattr(api, "_wait_for_retry", lambda seconds, event, reason: waits.append(reason))
+
+    response = api.request_with_retries(
+        session, "GET", "https://example.test/v1/novel/episode", max_retries=4
+    )
+
+    assert response.status_code == 500
+    assert len(session.calls) == 1
+    assert waits == []
+
+
+def test_episode_ticket_classifies_ad_block_without_retrying(monkeypatch):
+    monkeypatch.setattr(api, "_wait_for_retry", lambda seconds, event, reason: pytest.fail(reason))
+    body = _ticket_block_body("0008", "novel.ADVERTISEMENT_EPISODE", 23, 2407)
+    session = FakeSession([FakeResponse(500, body)])
+    client = _client_with_session(session)
+
+    with pytest.raises(api.TicketAccessError, match="^ad-gated episode$"):
+        client.episode_ticket(2407)
+
+    assert len(session.calls) == 1
+
+
+def test_episode_ticket_classifies_premium_block_without_retrying(monkeypatch):
+    monkeypatch.setattr(api, "_wait_for_retry", lambda seconds, event, reason: pytest.fail(reason))
+    body = _ticket_block_body("0009", "novel.PREMIUM_EPISODE", "23", "2408")
+    session = FakeSession([FakeResponse(500, body)])
+    client = _client_with_session(session)
+
+    with pytest.raises(api.TicketAccessError, match="^premium episode blocked$"):
+        client.episode_ticket(2408)
+
+    assert len(session.calls) == 1
+
+
+def test_episode_ticket_malformed_block_body_retries_as_unknown_500(monkeypatch):
+    waits = []
+    monkeypatch.setattr(api, "_wait_for_retry", lambda seconds, event, reason: waits.append(reason))
+    body = {
+        "code": "0008",
+        "errmsg": "novel.ADVERTISEMENT_EPISODE",
+        "result": {"data": {}},
+    }
+    session = FakeSession([FakeResponse(500, body) for _ in range(4)])
+    client = _client_with_session(session)
+
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        client.episode_ticket(2407)
+
+    assert len(session.calls) == 4
+    assert waits == ["server-error backoff"] * 3
+
+
+def test_episode_ticket_unknown_500_still_retries(monkeypatch):
+    waits = []
+    monkeypatch.setattr(api, "_wait_for_retry", lambda seconds, event, reason: waits.append(reason))
+    session = FakeSession(
+        [
+            FakeResponse(500, {"errmsg": "temporary"}),
+            FakeResponse(500, {"errmsg": "temporary"}),
+            FakeResponse(500, {"errmsg": "temporary"}),
+            FakeResponse(200, {"result": {"token": "fixture-token"}}),
+        ]
+    )
+    client = _client_with_session(session)
+
+    ticket = client.episode_ticket(2409)
+
+    assert ticket == {"result": {"token": "fixture-token"}}
+    assert len(session.calls) == 4
+    assert waits == ["server-error backoff"] * 3
 
 
 def test_novel_maps_server_error_to_unavailable_novel(monkeypatch):
@@ -558,6 +662,24 @@ def test_fetch_episode_keeps_non_cancel_errors_chapter_scoped():
     )
     with pytest.raises(api.DownloadCancelled):
         client.fetch_episode({"episode_no": 12, "epi_title": "Prologue"})
+
+
+def test_fetch_episode_maps_ad_block_to_chapter_error_dict():
+    client = make_client_without_init()
+    content_calls = []
+    client.episode_ticket = lambda epi_no: (_ for _ in ()).throw(
+        api.TicketAccessError("ad-gated episode")
+    )
+    client.episode_content = lambda token: content_calls.append(token) or {}
+
+    result = client.fetch_episode({"episode_no": 2407, "epi_title": "Prologue"})
+
+    assert result == {
+        "error": "ad-gated episode",
+        "epi_no": 2407,
+        "epi_title": "Prologue",
+    }
+    assert content_calls == []
 
 
 def test_parallel_fetch_preserves_input_order_and_reports_progress():
