@@ -64,7 +64,7 @@ Tests assert return values, written files, raised exceptions, cookies actually s
 
 No live Novelpia calls. Use `tests/conftest.py` fixtures. `FakeSession` lives in `tests/test_api.py` and `tests/test_epub_security.py`.
 
-After test edits, `python -m pytest --collect-only -q`, then `python -m pytest`.
+Install test deps from `requirements-dev.txt`. After test edits, `python -m pytest --collect-only -q`, then `python -m pytest`.
 
 If a cache or API contract changes, say so and test against a disposable output directory.
 

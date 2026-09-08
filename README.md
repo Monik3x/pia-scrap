@@ -110,3 +110,14 @@ After a queue finishes, CLI and GUI both show a short run recap: failed or skipp
 ## Quick Notes
 
 Parallel fetching (multithreading) is pretty much fundamentally incompatible with Novelpia's API. It has a low threshold concerning rate limits and requests per second. Even with stagger it will immediately throw out a HTTP 429 (Too Many Requests) error. Parallel downloading only works if the server allows high concurrency. Therefore, 99% of the time, **it's slower than sending requests sequentially**. Don't ask me why it's there.
+
+---
+
+## Development
+
+Running the downloader only needs `requirements.txt`. Tests, OpenAPI specs, and agent docs ship in the same tree and are unused at runtime.
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```

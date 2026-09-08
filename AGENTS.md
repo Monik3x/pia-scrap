@@ -37,6 +37,7 @@ only. Tokens do not appear in source, logs, fixtures, issues, or agent docs.
 
 ## Tests
 
-`python -m pytest`. `PermissionError` from `pytest-of-*`, `.pytest-tmp`,
-or `--basetemp` is a Windows sandbox failure (`WinError 5` on `tmp_path`),
-not a project test failure.
+`pip install -r requirements-dev.txt`, then `python -m pytest`.
+`PermissionError` from `pytest-of-*`, `.pytest-tmp`, or `--basetemp` is a
+Windows sandbox failure (`WinError 5` on `tmp_path`), not a project test
+failure.
