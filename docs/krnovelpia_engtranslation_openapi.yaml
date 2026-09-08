@@ -1,0 +1,3210 @@
+openapi: 3.1.0
+
+info:
+  title: Unofficial Novelpia API
+  description: |
+    This is an unofficial API specification for the Novelpia (novelpia.com) web novel platform.
+
+    This was written through reverse engineering of the public web interface (the PNWC·NWC·WNC novel scraper series,
+    and the betternovelpia userscript).
+
+    ## Authentication
+    Endpoints that require login use the `LOGINKEY` cookie.
+    The cookie value is a string in the form `<hex_a>_<hex_b>`.
+
+    Endpoints protected by CSRF must include the value of the page's `#csrf` element or
+    the `csrf` value included in the `alarm_btn` JavaScript function in the payload.
+
+    ## Notes
+    - According to `robots.txt`, the `/proc/`, `/json/`, `/api/`, `/error/`, `/viewer/`, and `/comic_viewer/`
+      paths are Disallowed for ordinary search-engine bots (except specified bots such as Googlebot·Yeti·Daum).
+    - This API may change and is not officially supported.
+    - To avoid server load, a reasonable delay (1–3 seconds) between requests is recommended.
+  version: "0.1.0"
+  contact:
+    name: Novelpia
+    url: https://novelpia.com
+
+servers:
+  - url: https://novelpia.com
+    description: Novelpia Korean server
+
+tags:
+  - name: Page (HTML)
+    description: HTML page endpoints rendered directly in a browser
+  - name: Novels
+    description: `/proc/` endpoints related to novel information and lists
+  - name: Episodes
+    description: `/proc/` endpoints related to episode lists and content
+  - name: Users
+    description: `/proc/` endpoints related to member information and actions (preferences·alerts·blocks)
+  - name: Novel lists
+    description: Novel list·ranking·search HTML pages (`/freestory`, `/plus`, `/top100`, `/search`)
+  - name: Site-wide
+    description: Common HTML pages such as login·registration·notices·shops·events
+  - name: Arena
+    description: Community board (Arena) HTML pages (`/arena`)
+
+# ─────────────────────────────────────────────────────────────
+# Components
+# ─────────────────────────────────────────────────────────────
+components:
+
+  # ── Security schemes ─────────────────────────────────────────────
+  securitySchemes:
+    loginKeyCookie:
+      type: apiKey
+      in: cookie
+      name: LOGINKEY
+      description: |
+        Login session key. Format: `<32-hex-character string>_<32-hex-character string>`
+        Example: `example-loginkey`
+
+    csrfToken:
+      type: apiKey
+      in: cookie
+      name: csrf
+      description: |
+        CSRF protection token. Extract it from the page DOM's `#csrf` element value or
+        the `"csrf": "..."` value in the `alarm_btn` JS function.
+
+  # ── Schemas ──────────────────────────────────────────────
+  schemas:
+
+    UserEmoticonItem:
+      type: object
+      description: |
+        An owned emoticon item within a group in the response to `/proc/emoticon_proc?mode=get_user_emoticon`.
+        (Its field structure differs from the items returned by `get_user_emoticon_group`, which lists groups.)
+      properties:
+        idx:
+          type: integer
+          description: Unique ID of the emoticon item
+          example: 12068
+        is_use:
+          type: integer
+          description: Whether it is available for use (1 = available)
+          example: 1
+        is_fav:
+          type: integer
+          description: Whether it is a favorite (1 = favorite)
+          example: 0
+        state:
+          type: integer
+          description: Emoticon status (same meaning as `state` in the group list)
+          example: 8
+        emoticon_url:
+          type: string
+          description: Emoticon image URL (protocol-relative path)
+          example: "//images.novelpia.com/img/emoticon/174/12068.png"
+
+    BaseResponse:
+      type: object
+      description: Common fields in all `/proc/` JSON responses
+      properties:
+        status:
+          description: HTTP status code (string or integer)
+          oneOf:
+            - type: string
+              example: "200"
+            - type: integer
+              example: 200
+        errmsg:
+          type: string
+          description: Error message. Empty string when successful.
+          example: ""
+      required:
+        - status
+        - errmsg
+
+    Novel:
+      type: object
+      description: Novelpia novel (work) information
+      properties:
+        novel_no:
+          type: [integer, string]
+          minimum: 1
+          description: Unique novel number (ID)
+          example: 372669
+        novel_name:
+          type: string
+          description: Novel title
+          example: "다크 판타지에서도 쌀은 먹고 살아야지?"
+        novel_story:
+          type: [string, "null"]
+          description: Plot (work introduction). May be omitted from list responses
+          example: "마녀가 지배하는 도시에서..."
+        writer_nick:
+          type: [string, "null"]
+          description: Author pseudonym
+          example: "미츄리"
+        mem_nick:
+          type: [string, "null"]
+          description: Author pseudonym (may duplicate `writer_nick` because of a field-name issue)
+          example: "미츄리"
+        writer_original:
+          type: [string, "null"]
+          description: Original author (for translated or derivative works)
+          example: ""
+        mem_no:
+          type: integer
+          minimum: 1
+          description: Author member number
+          example: 28450
+        main_genre:
+          type: integer
+          minimum: 0
+          maximum: 14
+          description: |
+            Basic genre number
+            - 0: Harem
+            - 1: Fantasy
+            - 2: Martial arts
+            - 3: Modern
+            - 4: (Unknown)
+            - 5: Explicit
+            - 6: Romance
+            - 7: Alternate history
+            - 8: Sports
+            - 9: SF
+            - 10: Other
+            - 11: Parody
+            - 12: Modern fantasy
+            - 13: Light novel
+            - 14: Horror
+          example: 1
+        novel_genre:
+          oneOf:
+            - type: string
+              description: Detailed genre list (string serialized from a JSON array)
+              example: '["판타지","라이트노벨","일상","로맨스"]'
+            - type: array
+              description: Detailed genre list (array format, used by some endpoints)
+              items:
+                type: string
+              example: ["판타지", "중세", "하렘"]
+        novel_type:
+          type: integer
+          enum: [1, 2]
+          description: |
+            Novel type
+            - 1: PLUS (paid)
+            - 2: Free serial publication
+          example: 1
+        novel_age:
+          type: integer
+          minimum: 0
+          description: |
+            Minimum viewing age
+            - 0: All ages
+            - 15: Age 15 and over
+            - 19: Adult (age 19 and over)
+          example: 0
+        novel_live:
+          type: integer
+          enum: [0, 1, 2]
+          description: |
+            Publication status code (combined with `is_complete` and `is_del` to determine the final status)
+            - 0: Ongoing
+            - 1: Publication delayed
+            - 2: Publication discontinued
+          example: 0
+        is_del:
+          type: integer
+          enum: [0, 1]
+          description: Whether deleted (1 means deleted)
+          example: 0
+        is_complete:
+          type: integer
+          enum: [0, 1]
+          description: Whether complete (1 means complete)
+          example: 0
+        is_monopoly:
+          type: integer
+          enum: [0, 1]
+          description: Whether exclusive to the platform
+          example: 1
+        is_translation:
+          type: integer
+          enum: [0, 1]
+          description: Whether this is a translated work
+          example: 0
+        flag_translate:
+          type: integer
+          enum: [0, 1]
+          description: Whether this is a translated work (Korean-server field name; same as `is_translation`)
+          example: 0
+        is_secondary_creation:
+          type: integer
+          enum: [0, 1]
+          description: Whether this is a derivative work
+          example: 0
+        is_donation_refusal:
+          type: integer
+          enum: [0, 1]
+          description: Whether donations are refused
+          example: 0
+        is_contest:
+          type: integer
+          minimum: 0
+          description: |
+            Awarded contest ID (0 means none)
+            - 2: 2021 Space Supreme Contest
+            - 4: 2022 Novelpia Creation of Heaven and Earth Contest
+            - 5: 2022 Masterpiece Adult Web Novel Contest
+            - 7: 2022 Novelpia 2nd Space Supreme Contest
+            - 12: 2023 Novelpia 3rd Space Supreme Contest
+            - 17: 2024 Novelpia 4th Space Supreme Contest
+          example: 0
+        is_osmu:
+          type: [string, "null"]
+          description: OSMU (One Source Multi Use) platform identifier
+          example: "toptoon"
+        isbn:
+          type: [string, "null"]
+          description: International Standard Book Number (ISBN-13)
+          example: "9791140400256"
+        local_code:
+          type: [string, "null"]
+          description: Language/region code
+          example: "KR"
+        reg_date:
+          type: [string, "null"]
+          format: date-time
+          description: Work registration timestamp
+          example: "2021-01-07T12:00:00"
+        complete_date:
+          type: [string, "null"]
+          format: date-time
+          description: Publication end (completion) timestamp
+          example: null
+        last_write_date:
+          type: [string, "null"]
+          format: date-time
+          description: Most recent (or scheduled) publication timestamp
+          example: "2024-09-13T18:00:00"
+        del_date:
+          type: [string, "null"]
+          format: date-time
+          description: Work deletion timestamp
+          example: null
+        status_date:
+          type: [string, "null"]
+          format: date-time
+          description: Server-side information update timestamp
+          example: "2024-09-13T18:05:00"
+        update_dt:
+          type: [string, "null"]
+          format: date-time
+          description: Novel update timestamp
+          example: "2024-09-13T18:00:00"
+        count_view:
+          type: integer
+          minimum: 0
+          description: View count
+          example: 1500000
+        count_good:
+          type: integer
+          minimum: 0
+          description: Recommendation count
+          example: 3200
+        count_pick:
+          type: [integer, "null"]
+          minimum: 0
+          description: Life-pick rank/count
+          example: 242
+        count_like:
+          type: integer
+          minimum: 0
+          description: Preference count
+          example: 1895
+        count_alarm:
+          type: integer
+          minimum: 0
+          description: Alert subscription count
+          example: 1896
+        count_book:
+          type: integer
+          minimum: 0
+          description: Total episode count
+          example: 150
+        novel_thumb:
+          type: [string, "null"]
+          description: Novel thumbnail image URL (relative path)
+          example: "//images.novelpia.com/imagebox/cover/11576a6b7d10e5a37598da89dfa7b3b6_369320_ori.wimg"
+        rank_view:
+          type: [string, integer, "null"]
+          description: Ranking-basis view count (appears only in popular lists)
+          example: "97810"
+        rank_exp:
+          type: [string, "null"]
+          description: Ranking rise/fall information (generally null)
+          example: null
+
+    EpisodeTextLine:
+      type: object
+      description: One line of episode content
+      properties:
+        text:
+          type: string
+          description: |
+            One line of body text.
+            Blank lines are represented by the value `"&nbsp;"`.
+          example: "마녀가 도시를 지배하기 시작했을 때,"
+
+    EpisodeViewCount:
+      type: object
+      description: View-count entry for a specific episode
+      properties:
+        episode_no:
+          type: integer
+          description: Episode number (same as `ep_code`)
+          example: 12606
+        count_view:
+          type: string
+          description: View count (comma-separated numeric string)
+          example: "1,057"
+
+    MemberView:
+      type: object
+      description: Public member-profile statistics (the `result` in a `get_member_view` response)
+      properties:
+        mem_no:
+          type: integer
+          minimum: 1
+          description: Unique member number
+          example: 300142
+        view_comment:
+          type: ["integer", "null"]
+          description: Comment visibility (null or integer; meaning unclear)
+          example: null
+        view_like_novel:
+          type: integer
+          description: Preferred-work visibility (0 = private, 1 = probably public)
+          example: 0
+        view_like_hash:
+          type: integer
+          description: Preferred-hashtag visibility (0 = private, 1 = probably public)
+          example: 0
+        view_sponsor:
+          type: integer
+          description: Donation visibility (0 = private, 1 = probably public)
+          example: 0
+        episode_cnt:
+          type: integer
+          minimum: 0
+          description: Total number of episodes read by the member
+          example: 76318
+        comment_cnt:
+          type: integer
+          minimum: 0
+          description: Number of comments by the member
+          example: 0
+
+    MemberBlockChk:
+      type: object
+      description: Check whether a specific member is blocked (the `result` in a `get_user_block_chk` response)
+      properties:
+        idx:
+          type: integer
+          description: Unique block-record ID
+          example: 883261
+        mem_no:
+          type: integer
+          minimum: 1
+          description: Member number that performed the block (self)
+          example: 2529720
+        target_mem_no:
+          type: integer
+          minimum: 1
+          description: Member number of the blocked target
+          example: 4169856
+        regdate:
+          type: string
+          format: date-time
+          description: Block registration timestamp
+          example: "2026-06-28 02:08:52"
+
+    NovelReviewItem:
+      type: object
+      description: A single novel review (work review)
+      properties:
+        board_no:
+          type: integer
+          description: Board number (the work-review board is 5)
+          example: 5
+        content_no:
+          type: integer
+          description: Unique post ID
+          example: 1660545
+        content_cate:
+          type: integer
+          description: Post category (work reviews are 32)
+          example: 32
+        content_subject:
+          type: string
+          description: Review title
+          example: "세상에서 가장 성능좋은 세탁기"
+        content_link:
+          type: string
+          format: uri
+          description: URL of the reviewed novel
+          example: "https://novelpia.com/novel/6269"
+        content_image:
+          type: string
+          description: Attached image (empty string if none)
+          example: ""
+        content_memo_linkno:
+          type: integer
+          description: Direct-link number for the review post
+          example: 104678092
+        content_adult:
+          type: integer
+          description: Adult-content flag (0 = general, 1 = adult)
+          example: 0
+        mem_nick:
+          type: string
+          description: Author nickname HTML (includes a badge img tag)
+          example: "<b style='cursor:pointer;font-weight:500;' onclick=\"location='/user/130334';\">LaVan</b>"
+        mem_no:
+          type: integer
+          description: Author member number
+          example: 130334
+        count_view:
+          type: integer
+          description: Review view count
+          example: 34980
+        count_comment:
+          type: integer
+          description: Comment count
+          example: 21
+        count_good:
+          type: integer
+          description: Recommendation count
+          example: 132
+        content_regdate:
+          type: string
+          format: date-time
+          description: Review creation timestamp
+          example: "2022-09-10 06:22:54"
+        novel_name:
+          type: string
+          description: Novel title
+          example: "용사 파티 때려치웁니다"
+        novel_no:
+          type: integer
+          description: Novel number
+          example: 6269
+        novel_img:
+          type: string
+          description: Novel cover image path (relative path)
+          example: "/imagebox/cover/e5e9a54e3daee56446bf4fdb9b578b0e_16789365_q_ori.file"
+        novel_img_all:
+          type: string
+          description: Full novel cover image path
+          example: "/imagebox/cover/e5e9a54e3daee56446bf4fdb9b578b0e_16789365_q_ori.file"
+        novel_thumb:
+          type: string
+          description: Novel thumbnail URL
+          example: "//images.novelpia.com/imagebox/cover/f636f1f08147f05e291296e79ba74726_390878_ori.wimg"
+        novel_thumb_all:
+          type: string
+          description: Full novel thumbnail path
+          example: "/imagebox/cover/f636f1f08147f05e291296e79ba74726_390878_ori.file"
+        user_img:
+          type: string
+          description: Author profile image HTML img tag (empty string if none)
+          example: "<img src=\"https://phinf.pstatic.net/...\" class=\"rounded-circle s_inv\">"
+        cover_url:
+          type: string
+          description: Novel cover URL (same as `novel_thumb`)
+          example: "//images.novelpia.com/imagebox/cover/f636f1f08147f05e291296e79ba74726_390878_ori.wimg"
+
+    PipeDelimitedResponse:
+      type: string
+      description: |
+        A text response separated by pipe characters (`|`).
+
+        Format: `{status}|{count}||{extra}`
+
+        - `status`: `on` (enabled) · `off` (disabled) · `login` (login required)
+        - `count`: Current count after enabling/disabling (integer)
+        - `extra`: Reserved field (usually empty or `0`)
+      examples:
+        - "on|1896||0"
+        - "off|1895||"
+        - "login|0||"
+
+  # ── Reusable request bodies ────────────────────────────────────────
+  requestBodies:
+
+    GetNewHotListBody:
+      description: Request body for retrieving a new popular list
+      required: true
+      content:
+        multipart/form-data:
+          schema:
+            type: object
+            required: [mode, period, target]
+            properties:
+              mode:
+                type: string
+                enum: [getNewHotList]
+                example: "getNewHotList"
+              period:
+                type: string
+                enum: [weekly, realtime]
+                description: |
+                  Aggregation period
+                  - `weekly`: Weekly
+                  - `realtime`: Real time
+                example: "weekly"
+              target:
+                type: string
+                enum: [complete, view, like]
+                description: |
+                  Sort criterion / target filter
+                  - `complete`: Completed works
+                  - `view`: By views
+                  - `like`: By recommendations
+                example: "complete"
+              genre:
+                type: [string, "null"]
+                description: Korean genre name (for example, `판타지`, `무협`, `현대`). A blank value means "all"
+                example: "판타지"
+              main_genre:
+                type: [string, "null"]
+                description: Genre ID (0–14). Alternative format for the `genre` parameter. Using `genre` is generally recommended
+                example: ""
+              listpage:
+                type: string
+                description: Page number (starting at 0)
+                default: "0"
+                example: "0"
+
+    GetEpisodeCountViewBody:
+      description: Request body for batch episode view-count retrieval
+      required: true
+      content:
+        application/x-www-form-urlencoded:
+          schema:
+            type: object
+            required: [cmd, novel_no]
+            properties:
+              cmd:
+                type: string
+                enum: [get_episode_count_view, get_episode_cnt_view]
+                description: |
+                  Processing command
+                  - `get_episode_count_view`: New version
+                  - `get_episode_cnt_view`: Legacy version
+                example: "get_episode_count_view"
+              novel_no:
+                type: string
+                description: Novel number
+                example: "23"
+            additionalProperties:
+              type: string
+              description: |
+                `episode_arr[N]`-formatted episode-array item.
+
+                **New version** (`cmd=get_episode_count_view`):
+                  Key `episode_arr[N]`, value `"episode_count_view novel_count_view_{ep_code}"`
+
+                **Legacy version** (`cmd=get_episode_cnt_view`):
+                  Key `episode_arr[]`, value `"episode_cnt_view novel_cnt_view_{ep_code}"`
+
+                Up to 20 items (the number of episodes per page) can be sent at once.
+          examples:
+            New version:
+              summary: New-version parameters
+              value:
+                cmd: "get_episode_count_view"
+                novel_no: "23"
+            Legacy version:
+              summary: Legacy-version parameters
+              value:
+                cmd: "get_episode_cnt_view"
+                novel_no: "23"
+
+    GetMemberViewBody:
+      description: Request body for retrieving public member-profile statistics
+      required: true
+      content:
+        multipart/form-data:
+          schema:
+            type: object
+            required: [mode, mem_no]
+            properties:
+              mode:
+                type: string
+                enum: [get_member_view]
+                example: "get_member_view"
+              mem_no:
+                type: string
+                description: Member number to query
+                example: "300142"
+
+    GetFavoriteNovelBody:
+      description: Request body for retrieving a member's preferred-work list
+      required: true
+      content:
+        application/x-www-form-urlencoded:
+          schema:
+            type: object
+            required: [mode, mem_no]
+            properties:
+              mode:
+                type: string
+                enum: [get_member_favorite_novel]
+                example: "get_member_favorite_novel"
+              mem_no:
+                type: string
+                description: Member number to query
+                example: "12345"
+              "paging[rowCount]":
+                type: string
+                description: Maximum number of items to retrieve at once
+                default: "1000"
+                example: "1000"
+              "paging[curPage]":
+                type: string
+                description: Current page (starting at 1)
+                default: "1"
+                example: "1"
+              "paging[order]":
+                type: string
+                description: Sort-field
+                example: "date"
+              "paging[sort][date]":
+                type: string
+                enum: ["0", "1"]
+                description: |
+                  Date sort direction
+                  - `"0"`: Ascending
+                  - `"1"`: Descending
+                example: "1"
+
+# ─────────────────────────────────────────────────────────────
+# Paths
+# ─────────────────────────────────────────────────────────────
+paths:
+
+  # ══════════════════════════════════════════════
+  # HTML pages
+  # ══════════════════════════════════════════════
+
+  /novel/{novel_code}:
+    get:
+      tags: [Page (HTML)]
+      summary: Novel main page
+      description: |
+        Returns an HTML page containing the novel title·author name·plot·genres·statistics, and more.
+
+        | Situation | Modal message |
+        |------|------------|
+        | Deleted novel | `"삭제된 소설 입니다."` |
+        | Private (practice) work | `"잘못된 접근입니다."` |
+        | Invalid number | `"잘못된 소설 번호 입니다."` |
+
+        HTTP 200 is returned even in these error situations.
+      operationId: getNovelPage
+      parameters:
+        - name: novel_code
+          in: path
+          required: true
+          description: Unique novel number
+          schema:
+            type: integer
+            minimum: 1
+          example: 23
+      responses:
+        "200":
+          description: Novel page HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /viewer/{ep_code}:
+    get:
+      tags: [Page (HTML)]
+      summary: Episode viewer page (scroll mode)
+      description: |
+        An HTML page that displays episode content in a scrolling layout.
+        When a PLUS episode is accessed while logged out, a subscription notice popup appears.
+        `robots.txt` marks the entire `/viewer/` path as Disallowed for bots.
+      operationId: getViewerPage
+      security:
+        - loginKeyCookie: []
+        - {}
+      parameters:
+        - name: ep_code
+          in: path
+          required: true
+          description: Unique episode number
+          schema:
+            type: integer
+            minimum: 1
+          example: 3790123
+      responses:
+        "200":
+          description: Viewer HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /comic_viewer/{ep_code}:
+    get:
+      tags: [Page (HTML)]
+      summary: Episode viewer page (paged/comic mode)
+      description: |
+        An HTML page that displays episode content in a page-turning (comic) layout.
+        `robots.txt` marks the entire `/comic_viewer/` path as Disallowed for bots.
+      operationId: getComicViewerPage
+      security:
+        - loginKeyCookie: []
+        - {}
+      parameters:
+        - name: ep_code
+          in: path
+          required: true
+          description: Unique episode number
+          schema:
+            type: integer
+            minimum: 1
+          example: 3790123
+      responses:
+        "200":
+          description: Comic-mode viewer HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /user/{mem_no}:
+    get:
+      tags: [Page (HTML)]
+      summary: Member profile page
+      description: Returns the public profile page for a specific member.
+      operationId: getUserProfilePage
+      parameters:
+        - name: mem_no
+          in: path
+          required: true
+          description: Unique member number
+          schema:
+            type: integer
+            minimum: 1
+          example: 28450
+      responses:
+        "200":
+          description: Member profile HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /mybook:
+    get:
+      tags: [Page (HTML)]
+      summary: My library page
+      description: |
+        This is the My Library page containing the logged-in member's preferred works (likes).
+        Access without a login cookie redirects to the login page.
+      operationId: getMyBookPage
+      security:
+        - loginKeyCookie: []
+      responses:
+        "200":
+          description: My Library HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+        "302":
+          description: Not logged in → redirect to login page
+
+  /notice/{category}/view_{post_code}/:
+    get:
+      tags: [Page (HTML)]
+      summary: Notice page
+      operationId: getNoticePage
+      parameters:
+        - name: category
+          in: path
+          required: true
+          description: "Category slug (for example, `20`, `all`)"
+          schema:
+            type: string
+          example: "20"
+        - name: post_code
+          in: path
+          required: true
+          description: Unique post number
+          schema:
+            type: integer
+            minimum: 1
+          example: 1392
+      responses:
+        "200":
+          description: Notice HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /faq/{category}/view_{post_code}/:
+    get:
+      tags: [Page (HTML)]
+      summary: FAQ page
+      operationId: getFaqPage
+      parameters:
+        - name: category
+          in: path
+          required: true
+          description: "Category slug (for example, `all`)"
+          schema:
+            type: string
+          example: "all"
+        - name: post_code
+          in: path
+          required: true
+          description: Unique FAQ post number
+          schema:
+            type: integer
+            minimum: 1
+          example: 383218
+      responses:
+        "200":
+          description: FAQ HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+
+  # ══════════════════════════════════════════════
+  # Novel-related proc endpoints
+  # ══════════════════════════════════════════════
+
+  /proc/main:
+    post:
+      tags: [Novels]
+      summary: Main-page data processing (multi-purpose)
+      description: |
+        This multi-purpose main-page processing endpoint selects its behavior using the `mode` parameter.
+
+        | mode | Description |
+        |------|------|
+        | `getNewHotList` | Retrieve a new popular list |
+
+        The response returns a list of popular novels (as an array in the `result` field).
+      operationId: procMain
+      requestBody:
+        $ref: "#/components/requestBodies/GetNewHotListBody"
+      responses:
+        "200":
+          description: Popular-list JSON
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/BaseResponse"
+                  - type: object
+                    properties:
+                      result:
+                        type: array
+                        description: Popular novel list
+                        items:
+                          $ref: "#/components/schemas/Novel"
+              example:
+                status: "200"
+                errmsg: ""
+                result:
+                  - novel_genre:
+                      - "판타지"
+                      - "중세"
+                      - "하렘"
+                      - "먼치킨"
+                    novel_thumb: "//images.novelpia.com/imagebox/cover/11576a6b7d10e5a37598da89dfa7b3b6_369320_ori.wimg"
+                    novel_age: "0"
+                    novel_name: "다크 판타지에서도 쌀은 먹고 살아야지?"
+                    novel_no: "372669"
+                    mem_nick: "미츄리"
+                    rank_view: "97810"
+                    rank_exp: null
+                    main_genre: "1"
+
+  /proc/novel:
+    get:
+      tags: [Novels]
+      summary: Retrieve novel review list
+      description: |
+        Returns the work-review (novel-review) list for a specific novel.
+
+        The `cmd=get_novel_review_list` and `target_novel_no` query parameters are required.
+        The `_` parameter is a cache-busting timestamp and may be omitted.
+      operationId: getNovelReviewList
+      parameters:
+        - name: cmd
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [get_novel_review_list]
+          example: "get_novel_review_list"
+        - name: target_novel_no
+          in: query
+          required: true
+          schema:
+            type: integer
+          description: Novel number to query
+          example: 6269
+        - name: _
+          in: query
+          required: false
+          schema:
+            type: integer
+          description: Cache-busting timestamp (millisecond Unix timestamp)
+          example: 1782829890640
+      responses:
+        "200":
+          description: Novel review list JSON
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/BaseResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/NovelReviewItem"
+              example:
+                status: 200
+                code: ""
+                errmsg: ""
+                data:
+                  - board_no: 5
+                    content_no: 1660545
+                    content_cate: 32
+                    content_subject: "세상에서 가장 성능좋은 세탁기"
+                    content_link: "https://novelpia.com/novel/6269"
+                    content_image: ""
+                    content_memo_linkno: 104678092
+                    content_adult: 0
+                    mem_nick: "<b style='cursor:pointer;font-weight:500;' onclick=\"location='/user/130334';\">LaVan</b>"
+                    mem_no: 130334
+                    count_view: 34980
+                    count_comment: 21
+                    count_good: 132
+                    content_regdate: "2022-09-10 06:22:54"
+                    novel_name: "용사 파티 때려치웁니다"
+                    novel_no: 6269
+                    novel_img: "/imagebox/cover/e5e9a54e3daee56446bf4fdb9b578b0e_16789365_q_ori.file"
+                    novel_img_all: "/imagebox/cover/e5e9a54e3daee56446bf4fdb9b578b0e_16789365_q_ori.file"
+                    novel_thumb: "//images.novelpia.com/imagebox/cover/f636f1f08147f05e291296e79ba74726_390878_ori.wimg"
+                    novel_thumb_all: "/imagebox/cover/f636f1f08147f05e291296e79ba74726_390878_ori.file"
+                    user_img: ""
+                    cover_url: "//images.novelpia.com/imagebox/cover/f636f1f08147f05e291296e79ba74726_390878_ori.wimg"
+    post:
+      tags: [Novels]
+      summary: Novel-related processing (multi-purpose)
+      description: |
+        This multi-purpose novel-processing endpoint selects its behavior using the `cmd` parameter.
+
+        | cmd | Description |
+        |-----|------|
+        | `get_episode_count_view` | Batch episode view-count retrieval (new version) |
+        | `get_episode_cnt_view` | Batch episode view-count retrieval (legacy version) |
+
+        The two `cmd` values provide the same function; only the parameter names differ.
+      operationId: procNovel
+      requestBody:
+        $ref: "#/components/requestBodies/GetEpisodeCountViewBody"
+      responses:
+        "200":
+          description: Episode view-count JSON
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/BaseResponse"
+                  - type: object
+                    properties:
+                      list:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/EpisodeViewCount"
+              example:
+                status: 200
+                errmsg: ""
+                list:
+                  - episode_no: 7146
+                    count_view: "1,057"
+                  - episode_no: 7147
+                    count_view: "842"
+
+  /proc/novel_alarm:
+    post:
+      tags: [Novels]
+      summary: Toggle novel alert subscription
+      description: |
+        Enables or disables alerts for new episodes of a specific novel.
+        If already enabled, it is disabled; if disabled, it is enabled.
+
+        When logged out, the response is `login|0||`.
+      operationId: toggleNovelAlarm
+      security:
+        - loginKeyCookie: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [novel_no]
+              properties:
+                novel_no:
+                  type: string
+                  description: Novel number
+                  example: "23"
+      responses:
+        "200":
+          description: Pipe-delimited response
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/PipeDelimitedResponse"
+              example: "on|1896||0"
+
+  /proc/novel_like:
+    post:
+      tags: [Novels]
+      summary: Toggle preferred-work status for a novel
+      description: |
+        Registers a specific novel as a preferred work or removes it.
+        A CSRF token is required (the `"csrf"` value in the novel page's `alarm_btn` JS function).
+
+        When logged out, the response is `login|0||`.
+
+        **Note**: In live-server tests, the response body was observed to be an empty string (`Content-Length: 0`)
+        on success in some cases. It may differ from the pipe-delimited response format; use HTTP 200 to determine success.
+      operationId: toggleNovelLike
+      security:
+        - loginKeyCookie: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [novel_no, csrf_token]
+              properties:
+                novel_no:
+                  type: string
+                  description: Novel number
+                  example: "23"
+                csrf_token:
+                  type: string
+                  description: CSRF protection token
+                  example: "abc123def456"
+      responses:
+        "200":
+          description: |
+            An empty body (`Content-Length: 0`) or a pipe-delimited response on success.
+            Returns `login|0||` when logged out.
+          content:
+            text/plain:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/PipeDelimitedResponse"
+                  - type: string
+                    maxLength: 0
+                    description: Empty string on success
+              example: ""
+
+  /proc/board_option:
+    post:
+      tags: [Novels]
+      summary: Board-option processing (episode upvote/downvote)
+      description: |
+        Processes a board option according to the `option` parameter.
+
+        | option | Description |
+        |--------|------|
+        | `vote_novel` | Toggle episode upvote/downvote |
+
+        A CSRF token is required.
+        If the response starts with `on`, the vote was added; if it starts with `off`, the vote was removed.
+      operationId: procBoardOption
+      security:
+        - loginKeyCookie: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [option, value, csrf]
+              properties:
+                option:
+                  type: string
+                  enum: [vote_novel]
+                  description: Processing option type
+                  example: "vote_novel"
+                value:
+                  type: string
+                  description: Target episode number (`ep_code`)
+                  example: "3790123"
+                csrf:
+                  type: string
+                  description: CSRF protection token
+                  example: "abc123def456"
+      responses:
+        "200":
+          description: Pipe-delimited response
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/PipeDelimitedResponse"
+              example: "on|1||"
+
+  # ══════════════════════════════════════════════
+  # Episode-related proc endpoints
+  # ══════════════════════════════════════════════
+
+  /proc/episode_list:
+    post:
+      tags: [Episodes]
+      summary: Retrieve episode list
+      description: |
+        Returns an HTML fragment containing the episode list for a novel.
+        It contains 20 episodes per page.
+
+        - `sort`: Sort direction (`DOWN` = oldest first, `UP` = newest first)
+        - `page`: Starts at 0 (page 1 → `0`, page 2 → `1`, ...)
+        - When a login cookie is included, PLUS episode links are also included.
+
+        The response is a `<table>` fragment rather than the complete HTML.
+        The novel number is extracted from the `onclick` attribute of the `.page-link` tag in the episode list.
+      operationId: getEpisodeList
+      security:
+        - loginKeyCookie: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [novel_no]
+              properties:
+                novel_no:
+                  type: string
+                  description: Novel number
+                  example: "23"
+                sort:
+                  type: string
+                  enum: [DOWN, UP]
+                  default: DOWN
+                  description: |
+                    Sort direction
+                    - `DOWN`: Oldest first (ascending)
+                    - `UP`: Newest first (descending)
+                  example: "DOWN"
+                page:
+                  type: integer
+                  minimum: 0
+                  default: 0
+                  description: Page number (starting at 0)
+                  example: 0
+      responses:
+        "200":
+          description: Episode-list HTML fragment
+          content:
+            text/html:
+              schema:
+                type: string
+              example: |
+                <table class="s_inv">
+                  <tbody>
+                    <tr class="ep_style5" data-episode-no="7146">
+                      <td class="font12" onclick="$('.loads').show();location='/viewer/7146';">
+                        <b>
+                          <span class="b_free s_inv">무료</span>
+                          <i class="icon ion-bookmark" id="bookmark_7146" style="display:none;"></i>
+                          001. 능력 각성
+                        </b>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+
+  /proc/novel_comment/{novel_no}:
+    get:
+      tags: [Episodes]
+      summary: Retrieve novel comment list (HTML)
+      description: |
+        Retrieves the comments for a specific novel page by page.
+
+        Pagination is controlled by the `page` query parameter (starting at 1).
+        The number of comments per page follows the server default.
+
+        **Response format**: HTML fragment (not JSON)
+        - Header: `.comment_header` element (includes sort options)
+        - Comment item: `.row._comment_flag` (each comment has `id="comment_{comment_id}"`)
+        - Comment author: `<b onclick="location='/user/{mem_no}';">` format
+        - Comment content: `#comment_text_{comment_id}` div
+        - Upvote/downvote: `#comment_vote_{comment_id}`, `#comment_bad_vote_{comment_id}`
+        - Report: `#comment_report_{comment_id}`
+
+        Public comments can be retrieved while logged out.
+      operationId: getNovelComments
+      security:
+        - loginKeyCookie: []
+        - {}
+      parameters:
+        - name: novel_no
+          in: path
+          required: true
+          description: Unique novel number
+          schema:
+            type: integer
+            minimum: 1
+          example: 35
+        - name: page
+          in: query
+          required: false
+          description: Page number (starting at 1)
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          example: 1
+      responses:
+        "200":
+          description: Novel comment-list HTML fragment
+          content:
+            text/html:
+              schema:
+                type: string
+              example: |
+                <style>...</style>
+                <script>...</script>
+                <div style="display: flex; ..." class="comment_header">
+                    <div class="eplist-sub-title">
+                        <span> 소설 전체 댓글 </span>
+                    </div>
+                    <div>
+                        <span class="reply_all_toggle active">
+                            <i class="icon ion-ios-arrow-up"></i> 대댓글
+                        </span>
+                    </div>
+                </div>
+                <div class="row _comment_flag" id="comment_32514455">
+                    <div class="col-12 pd-b-10">
+                        <table class="c_s2" align="right">
+                            <tr>
+                                <td colspan="2" class="c_s1">
+                                    <b onclick="location='/user/264483';">Mulael</b>
+                                </td>
+                                <td valign="top" rowspan="1">
+                                    <img src="/img/layout/none_user.png" class="rounded-circle" style="width:32px; height: 32px;">
+                                </td>
+                            </tr>
+                            <tr>
+                                <td valign="top" class="c_s3" colspan="3">
+                                    <font style="color:#666;font-size:11px;">24.09.22 작성됨 </font>
+                                    <br>
+                                    <a href="/viewer/337"><span style="color:#666;font-size:11px;">댓글 회차 : 0. 필드의 마법사</span></a>
+                                    <br>
+                                    <div id="comment_text_32514455"></div>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td valign="top" style="text-align:right;" colspan="4">
+                                    <font style="color:#b214bc;font-size:11px;" id="comment_vote_32514455">
+                                        <i class="ion-thumbsup"></i> 추천 (0건)
+                                    </font>
+                                    <font style="color:#bc143b;font-size:11px;" id="comment_bad_vote_32514455">
+                                        <i class="ion-thumbsdown"></i> 비추 (0건)
+                                    </font>
+                                    <font id="comment_report_32514455" onclick="option_proc('comment_report', '32514455');">
+                                        <i class="ion-thumbsdown"></i> 신고
+                                    </font>
+                                </td>
+                            </tr>
+                        </table>
+                    </div>
+                </div>
+
+  /proc/viewer_data/{ep_code}:
+    post:
+      tags: [Episodes]
+      summary: Retrieve episode body data
+      description: |
+        Returns the text content of a specific episode as JSON.
+
+        **`Referer` header required**: A `Referer` in the form
+        `https://novelpia.com/viewer/{ep_code}` is required; without it, an empty body (Content-Length: 0) is returned.
+
+        PLUS episodes require the `LOGINKEY` cookie (a subscribed account).
+        If the user lacks permission or the number is invalid, an error-modal HTML page is returned instead of JSON.
+
+        The `size` parameter is the font size in points and does not affect the actual body.
+
+        The `c` field is presumed to contain AES-encrypted metadata (including `ct`, `iv`, and `s`).
+      operationId: getViewerData
+      security:
+        - loginKeyCookie: []
+        - {}
+      parameters:
+        - name: ep_code
+          in: path
+          required: true
+          description: Unique episode number
+          schema:
+            type: integer
+            minimum: 1
+          example: 3790123
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                size:
+                  type: integer
+                  default: 14
+                  description: Font size (pt) — does not affect response content
+                  example: 14
+      responses:
+        "200":
+          description: |
+            Episode-body JSON on success; error-modal HTML on failure.
+            Because the Content-Type may always be returned as `text/html`,
+            distinguish success from failure by whether JSON parsing succeeds.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [s, c]
+                properties:
+                  s:
+                    type: array
+                    description: List of body lines
+                    items:
+                      $ref: "#/components/schemas/EpisodeTextLine"
+                  c:
+                    type: string
+                    description: |
+                      AES-encrypted metadata JSON string.
+                      Format: `{"ct":"...","iv":"...","s":"..."}`
+                    example: '{"ct":"abc...","iv":"def...","s":"ghi..."}'
+              example:
+                s:
+                  - text: "마녀가 도시를 지배하기 시작했을 때,"
+                  - text: "&nbsp;"
+                  - text: "아무도 그것을 막지 않았다."
+                c: '{"ct":"abc123","iv":"def456","s":"ghi789"}'
+            text/html:
+              schema:
+                type: string
+                description: |
+                  Error alert-modal HTML returned on failure.
+                  The error message is contained in the `#alert_modal` element.
+
+  # ══════════════════════════════════════════════
+  # User-related proc endpoints
+  # ══════════════════════════════════════════════
+
+  /proc/user:
+    post:
+      tags: [Users]
+      summary: User-related processing (multi-purpose)
+      description: |
+        This multi-purpose user-processing endpoint selects its behavior using the `mode` parameter.
+
+        | mode | Description | Authentication required |
+        |------|------|-----------|
+        | `get_member2` | Retrieve basic member information | Optional |
+        | `get_member_view` | Retrieve public member-profile statistics | Optional |
+        | `get_user_block_chk` | Check whether a specific member is blocked | Required |
+        | `get_member_writer_novel` | Author's work list (paged) | Optional |
+        | `get_member_badge` | Member badge list | Optional |
+        | `get_member_emoticon` | Member emoticon list | Optional |
+        | `get_member_stamp` | Member stamp list | Optional |
+        | `get_member_keep_novel` | Member's saved-novel list | Optional |
+        | `get_member_donation` | Member donation history | Optional |
+        | `get_episode_cnt` | Total number of episodes viewed by the member | Optional |
+        | `get_stat_hall_of_fame` | Hall-of-fame statistics | Optional |
+        | `get_member_favorite_novel` | Member's preferred-work list | Optional |
+
+        All modes use the `application/x-www-form-urlencoded` Content-Type.
+        (`get_member_view` also allows `multipart/form-data`.)
+      operationId: procUser
+      security:
+        - loginKeyCookie: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [mode]
+              properties:
+                mode:
+                  type: string
+                  enum:
+                    - get_member2
+                    - get_member_view
+                    - get_user_block_chk
+                    - get_member_writer_novel
+                    - get_member_badge
+                    - get_member_emoticon
+                    - get_member_stamp
+                    - get_member_keep_novel
+                    - get_member_donation
+                    - get_episode_cnt
+                    - get_stat_hall_of_fame
+                    - get_member_favorite_novel
+                  description: Processing mode
+                  example: "get_member2"
+                mem_no:
+                  type: string
+                  description: Member number to query (required in most modes)
+                  example: "4169856"
+                cate:
+                  type: string
+                  enum: [emoticon, donation, episode]
+                  description: "Category used by the `get_stat_hall_of_fame` mode"
+                  example: "emoticon"
+                "paging[rowCount]":
+                  type: string
+                  description: "Paging for `get_member_writer_novel` and `get_member_favorite_novel` — items per page"
+                  example: "5"
+                "paging[curPage]":
+                  type: string
+                  description: Current page (starting at 1)
+                  example: "1"
+                "paging[order]":
+                  type: string
+                  description: Sort-field
+                  example: "date"
+                "paging[sort][date]":
+                  type: string
+                  enum: ["0", "1"]
+                  description: |
+                    Date sort direction
+                    - `"0"`: Ascending
+                    - `"1"`: Descending
+                  example: "1"
+                "paging[totalPageCnt]":
+                  type: string
+                  description: Total page count (pass the value received from the previous response)
+                  example: "1"
+                "paging[rowCountGroup][]":
+                  type: string
+                  description: Items-per-page option (can be repeated)
+                  example: "10"
+          multipart/form-data:
+            schema:
+              type: object
+              required: [mode, mem_no]
+              properties:
+                mode:
+                  type: string
+                  enum: [get_member_view]
+                  example: "get_member_view"
+                mem_no:
+                  type: string
+                  description: Member number to query
+                  example: "300142"
+      responses:
+        "200":
+          description: |
+            Returns a different JSON response depending on the mode.
+
+            - `get_member2`: `result` contains a basic member-information object
+            - `get_member_view`: `result` contains a `MemberView` object
+            - `get_user_block_chk`: `result` contains a `MemberBlockChk` object (`null` or an empty object if not blocked)
+            - `get_member_writer_novel`: `result` contains the author's work list
+            - `get_member_badge`: `result` contains the badge list
+            - `get_member_emoticon`: `result` contains the emoticon list
+            - `get_member_stamp`: `result` contains the stamp list
+            - `get_member_keep_novel`: `result` contains the saved-novel list
+            - `get_member_donation`: `result` contains the donation history
+            - `get_episode_cnt`: `result` contains the episode count
+            - `get_stat_hall_of_fame`: `result` contains hall-of-fame statistics
+            - `get_member_favorite_novel`: `result` contains the preferred-work list
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - description: get_member_view response
+                    allOf:
+                      - $ref: "#/components/schemas/BaseResponse"
+                      - type: object
+                        properties:
+                          result:
+                            $ref: "#/components/schemas/MemberView"
+                  - description: get_user_block_chk response
+                    allOf:
+                      - $ref: "#/components/schemas/BaseResponse"
+                      - type: object
+                        properties:
+                          result:
+                            oneOf:
+                              - $ref: "#/components/schemas/MemberBlockChk"
+                              - type: "null"
+                                description: When not blocked
+                  - description: get_member_writer_novel response
+                    allOf:
+                      - $ref: "#/components/schemas/BaseResponse"
+                      - type: object
+                        properties:
+                          result:
+                            type: object
+                            properties:
+                              list:
+                                type: array
+                                description: Author's work list
+                                items:
+                                  $ref: "#/components/schemas/Novel"
+                              paging:
+                                type: object
+                                description: Paging information
+                  - description: get_member_favorite_novel response
+                    allOf:
+                      - $ref: "#/components/schemas/BaseResponse"
+                      - type: object
+                        properties:
+                          result:
+                            type: object
+                            properties:
+                              novel:
+                                type: array
+                                description: Preferred-work novel list
+                                items:
+                                  $ref: "#/components/schemas/Novel"
+                              allCount:
+                                type: integer
+                                minimum: 0
+                                description: Total number of preferred works
+                                example: 2
+                  - description: Other mode common response
+                    allOf:
+                      - $ref: "#/components/schemas/BaseResponse"
+                      - type: object
+                        properties:
+                          result:
+                            description: Mode-specific result data
+              examples:
+                get_user_block_chk:
+                  summary: get_user_block_chk response example
+                  value:
+                    status: "200"
+                    errmsg: ""
+                    result:
+                      idx: 883261
+                      mem_no: 2529720
+                      target_mem_no: 4169856
+                      regdate: "2026-06-28 02:08:52"
+                get_member_view:
+                  summary: get_member_view response example
+                  value:
+                    status: "200"
+                    errmsg: ""
+                    result:
+                      mem_no: 300142
+
+  /proc/alarm:
+    post:
+      tags: [Users]
+      summary: Alert processing (multi-purpose)
+      description: |
+        This alert-related endpoint selects its behavior using the `mode` parameter.
+
+        | mode | Description | Authentication required |
+        |------|------|-----------|
+        | `getAlarmCnt` | Retrieve unread-alert count | Required |
+      operationId: procAlarm
+      security:
+        - loginKeyCookie: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [mode]
+              properties:
+                mode:
+                  type: string
+                  enum: [getAlarmCnt]
+                  example: "getAlarmCnt"
+      responses:
+        "200":
+          description: Alert-processing JSON response
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/BaseResponse"
+                  - type: object
+                    properties:
+                      result:
+                        type: object
+                        description: "Response result for the `getAlarmCnt` mode"
+                        properties:
+                          cnt:
+                            type: integer
+                            minimum: 0
+                            description: Unread-alert count
+                            example: 3
+
+  /proc/member_plus:
+    get:
+      tags: [Users]
+      summary: Member Plus processing (multi-purpose)
+      description: |
+        This member-Plus endpoint selects its behavior using the `cmd` query parameter.
+
+        | cmd | Description |
+        |-----|------|
+        | `event_list` | Retrieve the list of currently active events |
+      operationId: procMemberPlus
+      security:
+        - loginKeyCookie: []
+        - {}
+      parameters:
+        - name: cmd
+          in: query
+          required: true
+          description: Processing command
+          schema:
+            type: string
+            enum: [event_list]
+          example: "event_list"
+        - name: ignore_list[]
+          in: query
+          required: false
+          description: Event IDs to ignore (repeatable)
+          schema:
+            type: array
+            items:
+              type: integer
+          style: form
+          explode: true
+          example: [321, 322]
+        - name: _
+          in: query
+          required: false
+          description: Cache-busting timestamp (milliseconds)
+          schema:
+            type: integer
+          example: 1782828459467
+      responses:
+        "200":
+          description: Event-list JSON or HTML fragment
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /proc/member_block:
+    post:
+      tags: [Users]
+      summary: Toggle member block/unblock
+      description: |
+        Blocks a specific member or removes the block.
+        If already blocked, the member is unblocked; otherwise, the member is blocked.
+
+        Primarily used for comments on viewer pages.
+        The CSRF token is the `value` of the page's `#csrf` element.
+      operationId: toggleMemberBlock
+      security:
+        - loginKeyCookie: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [member_no, csrf]
+              properties:
+                member_no:
+                  type: string
+                  description: Member number to block
+                  example: "12345"
+                csrf:
+                  type: string
+                  description: CSRF protection token (`value` of the `#csrf` element)
+                  example: "abc123def456"
+      responses:
+        "200":
+          description: Pipe-delimited response
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/PipeDelimitedResponse"
+              example: "on|1||"
+
+  /proc/viewer_board_comment:
+    post:
+      tags: [Users]
+      summary: Viewer-board comment processing (multi-purpose)
+      description: |
+        This viewer-board comment endpoint selects its behavior using the `mode` parameter.
+
+        | mode | Description | Authentication required |
+        |------|------|-----------|
+        | `get_user_block` | Retrieve the logged-in member's complete block list | Required |
+
+        All modes use the `application/x-www-form-urlencoded` Content-Type.
+      operationId: procViewerBoardComment
+      security:
+        - loginKeyCookie: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [mode]
+              properties:
+                mode:
+                  type: string
+                  enum:
+                    - get_user_block
+                  description: Processing mode
+                  example: "get_user_block"
+                mem_no:
+                  type: string
+                  description: Member number to query in the `get_user_block` mode
+                  example: "453905"
+      responses:
+        "200":
+          description: |
+            Returns a different JSON response depending on the mode.
+
+            - `get_user_block`: `result.user_block` contains an array of blocked member-number strings
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/BaseResponse"
+                  - type: object
+                    properties:
+                      result:
+                        type: object
+                        properties:
+                          user_block:
+                            type: array
+                            description: Blocked member-number list (strings)
+                            items:
+                              type: string
+                            example: ["68187", "512785", "175598"]
+              examples:
+                get_user_block:
+                  summary: get_user_block response example
+                  value:
+                    status: "200"
+                    errmsg: ""
+                    result:
+                      user_block: ["68187", "512785", "175598", "488213", "161638"]
+
+  /proc/emoticon_openstore:
+    get:
+      tags: [Novels]
+      summary: Retrieve author emoticon-store information
+      description: |
+        Returns information about emoticon products registered in the Open Store by the author of a specific novel.
+        Only the `mode=getWriterEmoticon` mode has been confirmed.
+      operationId: getWriterEmoticon
+      parameters:
+        - name: mode
+          in: query
+          required: true
+          description: Query mode
+          schema:
+            type: string
+            enum: [getWriterEmoticon]
+          example: "getWriterEmoticon"
+        - name: novel_no
+          in: query
+          required: true
+          description: Novel number
+          schema:
+            type: integer
+            minimum: 1
+          example: 23
+      responses:
+        "200":
+          description: Author emoticon-store information (JSON)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: integer
+                    description: "Response status code (200 = success)"
+                    example: 200
+                  code:
+                    type: string
+                    description: Error code (empty string on success)
+                    example: ""
+                  errmsg:
+                    type: string
+                    description: Error message (null on success)
+                    example: ""
+                  emoticon_group:
+                    type: string
+                    description: Open Store emoticon-group number (empty string if none)
+                    example: "1455"
+                  button_show:
+                    type: boolean
+                    description: Whether to display the emoticon purchase button
+                    example: true
+              example:
+                status: 200
+                code: ""
+                errmsg: ""
+                emoticon_group: "1455"
+                button_show: true
+    post:
+      tags: [Emoticons]
+      summary: Retrieve an emoticon/stamp group by image URL
+      description: |
+        Passing an emoticon image URL returns the emoticon group or stamp information containing that image
+        (`mode=getImgtoGrpEmt`).
+
+        The response is a pipe-delimited string in the form `"OK|<JSON>"`.
+        For an emoticon group, JSON array items contain `emoticon_group_name`/`emoticon_group`;
+        for a stamp, they contain `stamp_name`/`idx`.
+      operationId: getImgtoGrpEmt
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [mode, img]
+              properties:
+                mode:
+                  type: string
+                  enum: [getImgtoGrpEmt]
+                  example: "getImgtoGrpEmt"
+                img:
+                  type: string
+                  description: |
+                    The emoticon image URL (the `src` attribute of the `<img>` tag).
+
+                    Confirmed examples:
+                    - Group 1700 (Genius Wizard in the Comment Box):
+                      `https://images.novelpia.com/imagebox/77/776dd92168dde5a663e265c80ef165ce_111886.png`
+                    - Group 126 (Devil? Angel! Meta-chan):
+                      `https://image.novelpia.com/img/emoticon/i258rd1u0s/01.png`
+                  example: "https://images.novelpia.com/imagebox/77/776dd92168dde5a663e265c80ef165ce_111886.png"
+      responses:
+        "200":
+          description: |
+            Pipe-delimited response. On success, `OK|<JSON>`; on failure, an error message.
+
+            The JSON is an array of items, each in one of the following two forms:
+            - **Emoticon group**: `emoticon_group_name`, `emoticon_group`
+            - **Stamp**: `stamp_name`, `idx`
+          content:
+            text/plain:
+              schema:
+                type: string
+                description: "`OK|<JSON array>` or an error string"
+              examples:
+                emoticon_group_1700:
+                  summary: "Emoticon group 1700 — Genius Wizard in the Comment Box"
+                  value: 'OK|[{"emoticon_group_name":"댓글창의 천재 마법사","emoticon_group":"1700"}]'
+                emoticon_group_126:
+                  summary: "Emoticon group 126 — Devil? Angel! Meta-chan"
+                  value: 'OK|[{"emoticon_group_name":"악마? 앙마! 메타짱","emoticon_group":"126"}]'
+                stamp:
+                  summary: Stamp result (for reference)
+                  value: 'OK|[{"stamp_name":"응원 스탬프","idx":"42"}]'
+                error:
+                  summary: Error
+                  value: "해당 이모티콘을 찾을 수 없습니다."
+
+  /proc/emoticon_proc:
+    get:
+      tags: [Emoticons]
+      summary: Retrieve user emoticons (group list / group items)
+      description: |
+        This user-emoticon retrieval endpoint is used by the comment composer UI.
+        It performs one of two retrievals depending on the `mode` value.
+
+        - `mode=get_user_emoticon_group`: List of owned emoticon **groups**.
+          Without an authentication cookie (`LOGINKEY`), it returns HTTP `status:200` with an empty `data` array.
+          Adding the optional `target=sort` parameter produces a variant for the Novelticon ordering/display-management screen,
+          and each item includes the visibility flag `is_hide` (1 = hidden, 0 = shown).
+        - `mode=get_user_emoticon`: List of owned emoticons within a specific group (`emoticon_group_no`).
+          When logged out, it returns `status:401` ("Login is required.").
+          `data` is **polymorphic** — normally an array of emoticon objects,
+          but after a limited Novelticon free-use period expires, it becomes a single object with an `is_buy_emoticon` field.
+
+        Note: Both modes always return HTTP 200; distinguish the actual result or error using the body's `status` field.
+
+        ⚠️ Privacy: Each item in the `get_user_emoticon_group` response transmits extra fields that the client UI does not actually use
+        (`novel_owner`, `mem_no`, `emoticon_memo`, `coin`, `regdate`, and so on).
+        In particular, `novel_owner` exposes the **original email address of email-registered authors in plain text**
+        (the confirmed client script uses only `emoticon_group` and `emoticon_url`).
+      operationId: getUserEmoticon
+      parameters:
+        - name: mode
+          in: query
+          required: true
+          description: Query mode
+          schema:
+            type: string
+            enum: [get_user_emoticon_group, get_user_emoticon]
+          example: "get_user_emoticon_group"
+        - name: emoticon_group_no
+          in: query
+          required: false
+          description: "Emoticon-group number (`mode=get_user_emoticon` requires this)"
+          schema:
+            type: integer
+            minimum: 1
+          example: 174
+        - name: target
+          in: query
+          required: false
+          description: |
+            Used only with `mode=get_user_emoticon_group`. When set to `sort`, the response is for the
+            Novelticon ordering/display-management screen and each item includes the `is_hide` flag.
+          schema:
+            type: string
+            enum: [sort]
+          example: "sort"
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: User-owned emoticon-group list (JSON)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: integer
+                    description: "Response status code (200 = success)"
+                    example: 200
+                  code:
+                    type: string
+                    description: Error code (empty string on success)
+                    example: ""
+                  errmsg:
+                    type: ["string", "null"]
+                    description: Error message (null on success)
+                    example: null
+                  data:
+                    type: array
+                    description: Owned emoticon-group list
+                    items:
+                      type: object
+                      properties:
+                        idx:
+                          type: integer
+                          description: Unique emoticon-item ID
+                          example: 12260
+                        state:
+                          type: integer
+                          description: |
+                            Emoticon status.
+                            0 = free, 1 = purchasable, 2 = purchase linked to a work, 3 = time-limited (expired), 4 = membership-only, 8 = official Novelpia
+                          example: 2
+                        mem_no:
+                          type: integer
+                          description: |
+                            Author member number (0 for official Novelpia emoticons).
+                            ⚠️ This identifier allows member-number enumeration and is not used by the UI.
+                          example: 3763940
+                        novel_owner:
+                          type: string
+                          description: |
+                            Author account identifier. Social logins use `gg:` (Google) or `nv:` (Naver) prefixes;
+                            official emoticons are labeled "Novelpia".
+                            ⚠️ **Privacy exposure**: For email-registered authors, the original email address is exposed in plain text
+                            (for example, `zzz00713@naver.com`). This field is not used by the UI.
+                          example: "gg:110185598566906369508"
+                        novel_no:
+                          type: integer
+                          description: Linked novel number (0 for official emoticons)
+                          example: 370230
+                        emoticon_group:
+                          type: integer
+                          description: Emoticon-group number
+                          example: 1700
+                        emoticon_group_name:
+                          type: string
+                          description: Emoticon-group name
+                          example: "댓글창의 천재 마법사"
+                        emoticon_name:
+                          type: ["string", "null"]
+                          description: Individual emoticon name (null for group-level queries)
+                          example: null
+                        emoticon_url:
+                          type: string
+                          description: Representative emoticon image URL (protocol-relative path)
+                          example: "//images.novelpia.com/imagebox/77/776dd92168dde5a663e265c80ef165ce_111886.png"
+                        emoticon_memo:
+                          type: ["string", "null"]
+                          description: Emoticon description text (null if none)
+                          example: "댓천마 이모티콘이 출시되었습니다."
+                        coin:
+                          type: integer
+                          description: Purchase price (coins). 0 = free
+                          example: 30
+                        novel_url:
+                          type: ["string", "null"]
+                          description: Linked novel URL (unused; always null)
+                          example: null
+                        hit:
+                          type: integer
+                          description: View count (currently always 0)
+                          example: 0
+                        mileage:
+                          type: ["integer", "null"]
+                          description: Mileage price (1000 for time-limited emoticons; null for regular ones)
+                          example: null
+                        use_date:
+                          type: integer
+                          description: Whether usage is time-limited (0 = unlimited, 1 = time-limited)
+                          example: 0
+                        startdate:
+                          type: ["string", "null"]
+                          description: Usage start timestamp (time-limited emoticon; local time without ISO 8601)
+                          example: null
+                        enddate:
+                          type: ["string", "null"]
+                          description: Usage end timestamp (time-limited emoticon)
+                          example: null
+                        opendate:
+                          type: ["string", "null"]
+                          description: Public-availability start timestamp
+                          example: null
+                        regdate:
+                          type: string
+                          description: Registration timestamp (YYYY-MM-DD HH:mm:ss)
+                          example: "2026-01-28 14:49:35"
+                        is_trial:
+                          type: ["integer", "null"]
+                          description: Whether this is a trial
+                          example: null
+                        trial_start_dt:
+                          type: ["string", "null"]
+                          description: Trial start timestamp
+                          example: null
+                        trial_end_dt:
+                          type: ["string", "null"]
+                          description: Trial end timestamp
+                          example: null
+                        is_emoticon:
+                          type: ["integer", "null"]
+                          description: Emoticon flag (1 = emoticon, null = another type such as a stamp)
+                          example: 1
+                        flag_trial:
+                          type: ["integer", "null"]
+                          description: Trial flag
+                          example: null
+                        trial_member_start_dt:
+                          type: ["string", "null"]
+                          description: Membership-trial start timestamp
+                          example: null
+                        trial_member_end_dt:
+                          type: ["string", "null"]
+                          description: Membership-trial end timestamp
+                          example: null
+                        is_hide:
+                          type: integer
+                          description: |
+                            Whether the group is hidden (1 = hidden from the comment UI, 0 = shown).
+                            Included only in the `target=sort` variant response.
+                          example: 0
+              example:
+                status: 200
+                code: ""
+                errmsg: null
+                data:
+                  - idx: 12260
+                    state: 2
+                    mem_no: 3763940
+                    novel_owner: "gg:110185598566906369508"
+                    novel_no: 370230
+                    emoticon_group: 1700
+                    emoticon_group_name: "댓글창의 천재 마법사"
+                    emoticon_name: null
+                    emoticon_url: "//images.novelpia.com/imagebox/77/776dd92168dde5a663e265c80ef165ce_111886.png"
+                    emoticon_memo: "댓천마 이모티콘이 출시되었습니다."
+                    coin: 30
+                    novel_url: null
+                    hit: 0
+                    mileage: null
+                    use_date: 0
+                    startdate: null
+                    enddate: null
+                    opendate: null
+                    regdate: "2026-01-28 14:49:35"
+                    is_trial: null
+                    trial_start_dt: null
+                    trial_end_dt: null
+                    is_emoticon: 1
+                    flag_trial: null
+                    trial_member_start_dt: null
+                    trial_member_end_dt: null
+                  - idx: 7765
+                    state: 3
+                    mem_no: 0
+                    novel_owner: "노벨피아"
+                    novel_no: 0
+                    emoticon_group: 126
+                    emoticon_group_name: "악마? 앙마! 메타짱"
+                    emoticon_name: null
+                    emoticon_url: "//image.novelpia.com/img/emoticon/i258rd1u0s/01.png"
+                    emoticon_memo: null
+                    coin: 10
+                    novel_url: null
+                    hit: 0
+                    mileage: 1000
+                    use_date: 1
+                    startdate: "2023-07-11 15:00:00"
+                    enddate: "2023-07-31 15:00:00"
+                    opendate: "2023-07-11 15:00:00"
+                    regdate: "2023-07-07 15:06:06"
+                    is_trial: null
+                    trial_start_dt: null
+                    trial_end_dt: null
+                    is_emoticon: 1
+                    flag_trial: null
+                    trial_member_start_dt: null
+                    trial_member_end_dt: null
+          # Response shape for mode=get_user_emoticon (polymorphic):
+          #
+          # (1) Normal — array of owned emoticons within the group:
+          #   {"status":200,"code":"","errmsg":null,
+          #    "data":[{"idx":12068,"is_use":1,"is_fav":0,"state":8,
+          #             "emoticon_url":"//images.novelpia.com/img/emoticon/174/12068.png"}, ...]}
+          #
+          # (2) Limited Novelticon free-use period expired — single object with the is_buy_emoticon field:
+          #   {"status":200,"code":"","errmsg":null,
+          #    "data":{"is_buy_emoticon":1,"emoticon_group":174,
+          #            "emoticon_group_name":"...","emoticon_url":"..."}}
+          #   (is_buy_emoticon=1 → "Buy" button; otherwise → "View other emoticons")
+          #
+          # Calling mode=get_user_emoticon while logged out returns HTTP 200, but
+          # the body status is 401:
+          #   {"status":401,"code":"","errmsg":"Login is required."}
+          #
+          # See #/components/schemas/UserEmoticonItem for the schema of an emoticon item within a group.
+
+  # ══════════════════════════════════════════════
+  # Novel-list pages
+  # ══════════════════════════════════════════════
+
+  /:
+    get:
+      tags: [Novel lists]
+      summary: Home page
+      description: Novelpia's main home page, displaying recommended novels·events·rankings, and more.
+      operationId: getHome
+      responses:
+        "200":
+          description: Home HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /freestory:
+    get:
+      tags: [Novel lists]
+      summary: Free-serial list main page
+      description: |
+        The main page for free (no-cost) serial novels.
+        More detailed filtering is available through child paths.
+      operationId: getFreestoryMain
+      responses:
+        "200":
+          description: Free-serial list HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /freestory/{status}/{sort}/{page}/{genre_filter}:
+    get:
+      tags: [Novel lists]
+      summary: Free-serial list (filtered)
+      description: |
+        Filters the free-serial novel list by status·sort·page·genre.
+
+        **URL structure**: `/freestory/{status}/{sort}/{page}/{genre_filter}?main_genre={id}`
+
+        | Parameter | Example value |
+        |----------|---------|
+        | status | `all` · `new` · `complete` |
+        | sort | `date` · `view` · `vote` |
+        | page | 1, 2, 3, ... |
+        | genre_filter | `all` · `판타지` · `무협` · `현대` · `로맨스` · `SF`, and so on (optional) |
+        | main_genre | 0–14 (genre number; all if omitted) |
+      operationId: getFreestoryList
+      parameters:
+        - name: status
+          in: path
+          required: true
+          description: |
+            Free-serial status filter
+            - `all`: All
+            - `new`: New releases
+            - `complete`: Completed works
+          schema:
+            type: string
+            enum: [all, new, complete]
+          example: "all"
+        - name: sort
+          in: path
+          required: true
+          description: |
+            Sort criterion
+            - `date`: Newest first
+            - `view`: By views
+            - `vote`: By recommendations
+          schema:
+            type: string
+            enum: [date, view, vote]
+          example: "date"
+        - name: page
+          in: path
+          required: true
+          description: Page number (starting at 1)
+          schema:
+            type: integer
+            minimum: 1
+          example: 1
+        - name: genre_filter
+          in: path
+          required: true
+          description: "Genre slug — URL-encoded Korean (such as `판타지`) or `all` (all)"
+          schema:
+            type: string
+          example: "all"
+        - name: main_genre
+          in: query
+          required: false
+          description: |
+            Genre-number filter (all if omitted)
+            - 1: Fantasy, 2: Martial arts, 3: Modern, 6: Romance, 7: Alternate history
+            - 8: Sports, 9: SF, 10: Other, 11: Parody
+            - 12: Modern fantasy, 13: Light novel, 14: Horror
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 14
+      responses:
+        "200":
+          description: Free-serial list HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /plus:
+    get:
+      tags: [Novel lists]
+      summary: PLUS-serial list main page
+      description: The main page for PLUS (paid) serial novels.
+      operationId: getPlusMain
+      responses:
+        "200":
+          description: PLUS list HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /plus/{category}/{sort}/{page}:
+    get:
+      tags: [Novel lists]
+      summary: PLUS-serial list (filtered)
+      description: |
+        Filters the PLUS novel list by category·sort·page·genre.
+
+        **URL structure**: `/plus/{category}/{sort}/{page}/?main_genre={id}`
+
+        | Category | Description |
+        |----------|------|
+        | `all` | All PLUS |
+        | `complete_writer` | Completed author |
+        | `monopoly` | Exclusive |
+        | `entry` | New author |
+        | `complete` | Completed work |
+      operationId: getPlusList
+      parameters:
+        - name: category
+          in: path
+          required: true
+          description: PLUS category
+          schema:
+            type: string
+            enum: [all, complete_writer, monopoly, entry, complete]
+          example: "all"
+        - name: sort
+          in: path
+          required: true
+          description: "Sort criterion (`date` · `view` · `vote`)"
+          schema:
+            type: string
+            enum: [date, view, vote]
+          example: "date"
+        - name: page
+          in: path
+          required: true
+          description: Page number (starting at 1)
+          schema:
+            type: integer
+            minimum: 1
+          example: 1
+        - name: main_genre
+          in: query
+          required: false
+          description: Genre-number filter (all if omitted)
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 14
+          example: 1
+      responses:
+        "200":
+          description: PLUS list HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /top100:
+    get:
+      tags: [Novel lists]
+      summary: TOP 100 main page
+      description: The main ranking page for the top 100 novels by views and recommendations.
+      operationId: getTop100Main
+      responses:
+        "200":
+          description: TOP 100 HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /top100/{series_type}/{period}/{sort}/{age_filter}/{status_filter}:
+    get:
+      tags: [Novel lists]
+      summary: TOP 100 (filtered)
+      description: |
+        Filters the TOP 100 ranking by series type·period·sort·age·status.
+
+        **URL structure**: `/top100/{series_type}/{period}/{sort}/{age_filter}/{status_filter}?main_genre={id}`
+
+        | Parameter | Value |
+        |----------|-----|
+        | series_type | `all` · `plus` · `freestory` · `complete` |
+        | period | `today` · `weekly` · `month` |
+        | sort | `view` · `vote` · `like` · `pick` |
+        | age_filter | `all` · `teen` · `adult` |
+        | status_filter | `all` · `free` · `plus` |
+      operationId: getTop100List
+      parameters:
+        - name: series_type
+          in: path
+          required: true
+          description: Series-type filter
+          schema:
+            type: string
+            enum: [all, plus, freestory, complete]
+          example: "all"
+        - name: period
+          in: path
+          required: true
+          description: |
+            Aggregation period
+            - `today`: Daily
+            - `weekly`: Weekly
+            - `month`: Monthly
+          schema:
+            type: string
+            enum: [today, weekly, month]
+          example: "today"
+        - name: sort
+          in: path
+          required: true
+          description: |
+            Sort criterion
+            - `view`: By views
+            - `vote`: By recommendations
+            - `like`: By preferences
+            - `pick`: By life picks
+          schema:
+            type: string
+            enum: [view, vote, like, pick]
+          example: "view"
+        - name: age_filter
+          in: path
+          required: true
+          description: |
+            Age filter
+            - `all`: All
+            - `teen`: Youth-rated
+            - `adult`: Adult
+          schema:
+            type: string
+            enum: [all, teen, adult]
+          example: "all"
+        - name: status_filter
+          in: path
+          required: true
+          description: |
+            Serial-type filter
+            - `all`: All
+            - `free`: Free serial publication
+            - `plus`: PLUS serial publication
+          schema:
+            type: string
+            enum: [all, free, plus]
+          example: "all"
+        - name: main_genre
+          in: query
+          required: false
+          description: Genre-number filter (all if omitted)
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 14
+          example: 1
+      responses:
+        "200":
+          description: TOP 100 ranking HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /top100/rule/today/view:
+    get:
+      tags: [Novel lists]
+      summary: TOP 100 rules page
+      operationId: getTop100Rule
+      responses:
+        "200":
+          description: TOP 100 rules HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /search:
+    get:
+      tags: [Novel lists]
+      summary: Novel search
+      description: |
+        A page for searching by novel title·author name, and so on.
+        The search term is passed as a query parameter.
+      operationId: searchNovels
+      parameters:
+        - name: keyword
+          in: query
+          required: false
+          description: Search term
+          schema:
+            type: string
+          example: "마녀"
+      responses:
+        "200":
+          description: Search-results HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /novel_collect:
+    get:
+      tags: [Novel lists]
+      summary: Novel collection
+      description: A page listing editor-recommended novel collections.
+      operationId: getNovelCollect
+      responses:
+        "200":
+          description: Novel-collection HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /publishing/new:
+    get:
+      tags: [Novel lists]
+      summary: New publications list
+      description: A page listing recently published new novels.
+      operationId: getPublishingNew
+      responses:
+        "200":
+          description: New-publications list HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  # ══════════════════════════════════════════════
+  # Comic-related pages
+  # ══════════════════════════════════════════════
+
+  /comic_main:
+    get:
+      tags: [Novel lists]
+      summary: Comics main page
+      description: Novelpia's main webtoon/comics page.
+      operationId: getComicMain
+      responses:
+        "200":
+          description: Comics main HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /comic_freestory:
+    get:
+      tags: [Novel lists]
+      summary: Free comics list
+      description: The free-serial webtoon/comics list page.
+      operationId: getComicFreestory
+      responses:
+        "200":
+          description: Free comics-list HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /comic_search:
+    get:
+      tags: [Novel lists]
+      summary: Comic search
+      operationId: searchComics
+      responses:
+        "200":
+          description: Comic search-results HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /mybook_comicbook_like:
+    get:
+      tags: [Novel lists]
+      summary: My comics library (preferred works)
+      security:
+        - loginKeyCookie: []
+      operationId: getComicMybook
+      responses:
+        "200":
+          description: My comics library HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /comic_mylist:
+    get:
+      tags: [Novel lists]
+      summary: My comics list
+      security:
+        - loginKeyCookie: []
+      operationId: getComicMylist
+      responses:
+        "200":
+          description: My comics-list HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  # ══════════════════════════════════════════════
+  # Site-wide pages
+  # ══════════════════════════════════════════════
+
+  /alarm:
+    get:
+      tags: [Site-wide]
+      summary: Alert list page
+      description: The logged-in member's list of new-episode alerts.
+      security:
+        - loginKeyCookie: []
+      operationId: getAlarmList
+      responses:
+        "200":
+          description: Alert-list HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /user_free_ticket:
+    get:
+      tags: [Site-wide]
+      summary: Free-pass page
+      description: The member's free-pass balance and usage history.
+      security:
+        - loginKeyCookie: []
+      operationId: getUserFreeTicket
+      responses:
+        "200":
+          description: Free-pass HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /writer_room:
+    get:
+      tags: [Site-wide]
+      summary: Author space (creation room)
+      description: The creation-room page for author registration and work management.
+      security:
+        - loginKeyCookie: []
+      operationId: getWriterRoom
+      responses:
+        "200":
+          description: Author-space HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /page/login:
+    get:
+      tags: [Site-wide]
+      summary: Login page
+      operationId: getLoginPage
+      parameters:
+        - name: redirectrurl
+          in: query
+          required: false
+          description: URL to redirect to after successful login
+          schema:
+            type: string
+          example: "/mybook"
+      responses:
+        "200":
+          description: Login HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /page/join:
+    get:
+      tags: [Site-wide]
+      summary: Registration page
+      operationId: getJoinPage
+      responses:
+        "200":
+          description: Registration HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /page/id_search_new:
+    get:
+      tags: [Site-wide]
+      summary: ID/password recovery
+      operationId: getIdSearchPage
+      responses:
+        "200":
+          description: ID-recovery HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /page/terms_of_use:
+    get:
+      tags: [Site-wide]
+      summary: Terms of use
+      operationId: getTermsOfUse
+      responses:
+        "200":
+          description: Terms-of-use HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /page/privacy_policy:
+    get:
+      tags: [Site-wide]
+      summary: Privacy policy
+      operationId: getPrivacyPolicy
+      responses:
+        "200":
+          description: Privacy-policy HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /page/youth_policy:
+    get:
+      tags: [Site-wide]
+      summary: Youth protection policy
+      operationId: getYouthPolicy
+      responses:
+        "200":
+          description: Youth-protection-policy HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /page/partner:
+    get:
+      tags: [Site-wide]
+      summary: Partner information
+      operationId: getPartnerPage
+      responses:
+        "200":
+          description: Partner-information HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /notice:
+    get:
+      tags: [Site-wide]
+      summary: Notices main page
+      operationId: getNoticeMain
+      responses:
+        "200":
+          description: Notice-list HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /notice/all:
+    get:
+      tags: [Site-wide]
+      summary: All notices list
+      operationId: getNoticeAll
+      responses:
+        "200":
+          description: Full notice-list HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /notice/{category}:
+    get:
+      tags: [Site-wide]
+      summary: Notice category list
+      description: |
+        Notice list by category.
+
+        | Category | Description |
+        |----------|------|
+        | `20` | Update notices |
+        | `21` | General notices |
+      operationId: getNoticeByCategory
+      parameters:
+        - name: category
+          in: path
+          required: true
+          description: Notice category number
+          schema:
+            type: string
+          example: "20"
+      responses:
+        "200":
+          description: Category notice-list HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /faq:
+    get:
+      tags: [Site-wide]
+      summary: FAQ main page
+      operationId: getFaqMain
+      responses:
+        "200":
+          description: FAQ-list HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /qna:
+    get:
+      tags: [Site-wide]
+      summary: Q&A inquiry page
+      operationId: getQnaPage
+      responses:
+        "200":
+          description: Q&A HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /plus_shop:
+    get:
+      tags: [Site-wide]
+      summary: PLUS subscription shop
+      description: The page for purchasing a PLUS subscription.
+      operationId: getPlusShop
+      responses:
+        "200":
+          description: PLUS shop HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /coin_shop:
+    get:
+      tags: [Site-wide]
+      summary: Coin shop
+      description: The page for purchasing coins (Novelpia Coins).
+      operationId: getCoinShop
+      responses:
+        "200":
+          description: Coin-shop HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /openstore_v2:
+    get:
+      tags: [Site-wide]
+      summary: Open Store (v2) main page
+      description: The main Open Store page for selling novel-related merchandise·products.
+      operationId: getOpenStoreMain
+      responses:
+        "200":
+          description: Open Store HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /openstore_v2_tab/{tab}/{sort}/{page}:
+    get:
+      tags: [Site-wide]
+      summary: Open Store tab list
+      operationId: getOpenStoreTab
+      parameters:
+        - name: tab
+          in: path
+          required: true
+          description: "Tab type (`novel` · `open` · `mileage`)"
+          schema:
+            type: string
+            enum: [novel, open, mileage]
+          example: "novel"
+        - name: sort
+          in: path
+          required: true
+          description: "Sort criterion (`desc` · `asc`)"
+          schema:
+            type: string
+            enum: [desc, asc]
+          example: "desc"
+        - name: page
+          in: path
+          required: true
+          description: Page number (starting at 1)
+          schema:
+            type: integer
+            minimum: 1
+          example: 1
+      responses:
+        "200":
+          description: Open Store tab-list HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /openstore_v2_detail/{item_id}:
+    get:
+      tags: [Site-wide]
+      summary: Open Store product details
+      operationId: getOpenStoreDetail
+      parameters:
+        - name: item_id
+          in: path
+          required: true
+          description: Unique product number
+          schema:
+            type: integer
+            minimum: 1
+          example: 126
+      responses:
+        "200":
+          description: Product-details HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /event/{event_slug}:
+    get:
+      tags: [Site-wide]
+      summary: Event page
+      description: Various event·promotion pages.
+      operationId: getEventPage
+      parameters:
+        - name: event_slug
+          in: path
+          required: true
+          description: Event slug
+          schema:
+            type: string
+          example: "novel_new_challenge"
+      responses:
+        "200":
+          description: Event HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /novelcontribute_guide:
+    get:
+      tags: [Site-wide]
+      summary: Novel contribution guide
+      operationId: getNovelContributeGuide
+      responses:
+        "200":
+          description: Novel contribution guide HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /novelnew_guide2:
+    get:
+      tags: [Site-wide]
+      summary: New-work guide (v2)
+      operationId: getNovelNewGuide
+      responses:
+        "200":
+          description: New-work guide HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /novelticon_guide:
+    get:
+      tags: [Site-wide]
+      summary: Ticon guide
+      description: A guide page for using Novelpia emoticons (Ticons).
+      operationId: getNovelTiconGuide
+      responses:
+        "200":
+          description: Ticon guide HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /novelplus_guide:
+    get:
+      tags: [Site-wide]
+      summary: PLUS guide
+      operationId: getNovelPlusGuide
+      responses:
+        "200":
+          description: PLUS guide HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /novelcoin_guide:
+    get:
+      tags: [Site-wide]
+      summary: Coin guide
+      operationId: getNovelCoinGuide
+      responses:
+        "200":
+          description: Coin guide HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  # ══════════════════════════════════════════════
+  # Arena (community board)
+  # ══════════════════════════════════════════════
+
+  /arena/all:
+    get:
+      tags: [Arena]
+      summary: Arena full post list
+      description: |
+        The full post-list page for the Arena (community) board.
+        All posts are displayed without category separation.
+      operationId: getArenaAll
+      responses:
+        "200":
+          description: Arena full-list HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /arena/32:
+    get:
+      tags: [Arena]
+      summary: Arena work-review board
+      description: |
+        Arena board category 32 — the work-review board.
+        Reader reviews·impressions about works are posted here.
+      operationId: getArenaReview
+      responses:
+        "200":
+          description: Work-review board HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /arena/33:
+    get:
+      tags: [Arena]
+      summary: Arena work-promotion board
+      description: |
+        Arena board category 33 — the work-promotion board.
+        Posts promoting works by authors or readers are posted here.
+      operationId: getArenaPromotion
+      responses:
+        "200":
+          description: Work-promotion board HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+# ─────────────────────────────────────────────────────────────
+# Extension information (notes)
+# ─────────────────────────────────────────────────────────────
+x-novelpia-cookies:
+  description: |
+    Major cookies used by Novelpia
+
+    | Name | Example value | Description |
+    |------|---------|------|
+    | `LOGINKEY` | `example-loginkey` | Login session key |
+    | `USERKEY` | `example-userkey` | User identifier |
+    | `NPD{DD}{MM}1` | `NPD15081=meta` | Same-day generic cookie (DD = day, MM = month) |
+    | `NPK{MM}{DD}` | `NPK0811=OObWV0YQ..` | Same-day auxiliary cookie |
+    | `SITE_LANG` | `ko-KR` | Site language setting |
+    | `REF_DATA` | `/novel/1` | Last visited path |
+    | `PRIVATE_MODE` | `error` | Privacy-related processing |
+
+x-novelpia-robots:
+  description: |
+    `robots.txt` summary
+
+    - `User-agent: *` → `Disallow: /` (blocks all ordinary bots)
+    - The following bots are allowed (except for the paths below):
+      Googlebot / Yeti / Daum / Daumoa / Ads-Naver / facebookexternalhit
+      - `Disallow: /proc/`
+      - `Disallow: /json/`
+      - `Disallow: /api/`
+      - `Disallow: /error/`
+      - `Disallow: /viewer/`
+      - `Disallow: /comic_viewer/`
+
+x-novelpia-html-selectors:
+  description: |
+    Major CSS selectors used for HTML parsing
+
+    **Episode list (`episode_list` response)**
+
+    | Selector | Target |
+    |--------|------|
+    | `table.s_inv` | Episode-list table |
+    | `tr.ep_style5` | Episode row. `ep_code` is included in the `data-episode-no` attribute |
+    | `span.s_inv` | Episode-type tag (free·adult) |
+    | `.b_free` | Free-episode class |
+    | `.b_19` | Adult (19+) episode class |
+    | `span.episode_count_view.novel_count_view_{ep_code}` | Per-episode view-count widget |
+    | `i.ion-document-text` | Character-count icon |
+    | `i.ion-chatbox-working` | Comment-count icon |
+    | `i.ion-thumbsup` | Recommendation-count icon |
+    | `.page-link` | Page link (used to extract the novel number) |
+
+    **Viewer page**
+
+    | Selector | Target |
+    |--------|------|
+    | `#novel_box` | Viewer-body scrolling container |
+    | `#episode_list` | Episode-list container |
+    | `#comment_load` | Comment-list container |
+    | `#csrf` | CSRF-token input element |
+    | `.menu-top-tag` | Episode-number tag (for example, `EP.1`) |
+    | `#header_bar` | Top header bar |
+    | `#footer_bar` | Bottom footer bar |
+    | `#novel_drawing` | Novel illustration area |
+    | `#m-sidemenu .sidemenu-support` | Side menu (support) |
+
+x-novelpia-episode-num-format:
+  description: |
+    Episode number (`num`) display format
+
+    | Display | Meaning |
+    |------|------|
+    | `EP.0` | Prologue |
+    | `EP.N` | Episode N (starting at 1) |
+    | `BONUS` | Bonus episode |
+
+    New prologues cannot be registered after May 16, 2022.
+    The epilogue feature was removed on May 16, 2022.
+
+x-novelpia-date-format:
+  description: |
+    Episode-list date display format
+
+    | Original format | Meaning |
+    |-----------|------|
+    | `YY.MM.DD` | Past date (for example, `21.01.07` → `2021-01-07`) |
+    | `N hours ago` | Posted within 24 hours (N hours before the current time) |
+    | `N minutes ago` | Posted within 24 hours (N minutes before the current time) |
+    | `N hours from now` | Scheduled episode (published N hours after the current time) |
+    | `N minutes from now` | Scheduled episode (published N minutes after the current time) |
+
+    Scheduled episodes appear in the list starting 24 hours before publication.

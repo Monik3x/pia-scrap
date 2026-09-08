@@ -1,0 +1,649 @@
+openapi: 3.1.0
+info:
+  title: Novelpia Global API (Observed Contract)
+  version: 0.1.0
+  summary: Reverse-engineered API contract used by pia-scrap.
+  description: |
+    This is an unofficial, observation-based specification for the subset of the
+    Novelpia Global API consumed by pia-scrap. It is not published or endorsed by
+    Novelpia and may change without notice.
+
+    Evidence comes from the project's client implementation and seven successful,
+    redacted capture sets for novel metadata, episode lists, episode tickets, and
+    episode content. Operations or fields without captures are deliberately loose.
+
+    Use only with an account and content you are authorized to access. The ticket
+    and content operations do not grant access: the service still enforces account,
+    purchase, subscription, regional, and other access rules. Treat `login-at`,
+    `TKEY`, `_t`, and CloudFront signed values as secrets. Do not log or redistribute
+    episode content.
+
+    The observed client also sends `last_login=basic` as a cookie and browser-like
+    `Origin`, `Referer`, `X-Requested-With`, Fetch Metadata, and user-agent headers.
+    It is not yet known which of those are contractually required by the service.
+  contact:
+    name: pia-scrap project
+  x-spec-status: observed-unofficial
+  x-evidence-date: 2026-08-10
+servers:
+  - url: https://api-global.novelpia.com
+    description: Novelpia Global API
+tags:
+  - name: Authentication
+  - name: Novels
+  - name: Episodes
+paths:
+  /v1/member/login:
+    post:
+      tags: [Authentication]
+      operationId: login
+      summary: Create an authenticated session
+      description: |
+        Returns a `LOGINAT` value and may set `TKEY` and `USERKEY` cookies.
+        This response has not been captured in the supplied samples; only the
+        fields consumed by pia-scrap are specified.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Login response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400': {$ref: '#/components/responses/ErrorResponse'}
+        '401': {$ref: '#/components/responses/ErrorResponse'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /v1/login/refresh:
+    get:
+      tags: [Authentication]
+      operationId: refreshLogin
+      summary: Refresh the login token
+      description: The exact cookie requirements and error envelope need captures.
+      security:
+        - loginAt: []
+          userKey: []
+          tKey: []
+          lastLogin: []
+      responses:
+        '200':
+          description: Refreshed login token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401': {$ref: '#/components/responses/ErrorResponse'}
+        '403': {$ref: '#/components/responses/ErrorResponse'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /v1/login/me:
+    get:
+      tags: [Authentication]
+      operationId: getCurrentMember
+      summary: Get the current authenticated member
+      description: The project uses this call as an authentication check. Its result schema is not captured.
+      security:
+        - loginAt: []
+          userKey: []
+          tKey: []
+          lastLogin: []
+      responses:
+        '200':
+          description: Current-member envelope; `result` is intentionally unspecified.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnknownResultEnvelope'
+        '401': {$ref: '#/components/responses/ErrorResponse'}
+        '403': {$ref: '#/components/responses/ErrorResponse'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /v1/novel:
+    get:
+      tags: [Novels]
+      operationId: getNovel
+      summary: Get novel metadata
+      security:
+        - loginAt: []
+          userKey: []
+          tKey: []
+          lastLogin: []
+      parameters:
+        - $ref: '#/components/parameters/NovelNumber'
+      responses:
+        '200':
+          description: Novel metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NovelResponse'
+        '401': {$ref: '#/components/responses/ErrorResponse'}
+        '403': {$ref: '#/components/responses/ErrorResponse'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /v1/novel/list:
+    get:
+      tags: [Novels]
+      operationId: listNovels
+      summary: List public novels
+      description: |
+        pia-scrap requests only `rows`, then reads `result.list[].novel` and filters
+        `novel_locale=ko`. The complete query and response contracts are not captured.
+      security:
+        - loginAt: []
+          userKey: []
+          tKey: []
+          lastLogin: []
+      parameters:
+        - name: rows
+          in: query
+          required: false
+          schema: {type: integer, minimum: 1, default: 30}
+      responses:
+        '200':
+          description: Partial novel-list response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NovelListResponse'
+        '401': {$ref: '#/components/responses/ErrorResponse'}
+        '403': {$ref: '#/components/responses/ErrorResponse'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /v1/novel/like/list:
+    get:
+      tags: [Novels]
+      operationId: listLikedNovels
+      summary: List novels in the authenticated member's library
+      description: The query is observed in code; the response is specified only to the fields the project consumes.
+      security:
+        - loginAt: []
+          userKey: []
+          tKey: []
+          lastLogin: []
+      parameters:
+        - name: sort
+          in: query
+          required: false
+          schema: {type: string, enum: [asc, desc], default: desc}
+        - name: sort_col
+          in: query
+          required: false
+          schema: {type: string, default: lnl.reg_dt}
+        - name: page
+          in: query
+          required: false
+          schema: {type: integer, minimum: 1, default: 1}
+        - name: rows
+          in: query
+          required: false
+          schema: {type: integer, minimum: 1, default: 100}
+        - name: like_filter
+          in: query
+          required: false
+          schema: {type: integer, default: 0}
+      responses:
+        '200':
+          description: Partial liked-novel list response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NovelListResponse'
+        '401': {$ref: '#/components/responses/ErrorResponse'}
+        '403': {$ref: '#/components/responses/ErrorResponse'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /v1/novel/episode/list:
+    get:
+      tags: [Episodes]
+      operationId: listEpisodes
+      summary: List episodes for a novel
+      security:
+        - loginAt: []
+          userKey: []
+          tKey: []
+          lastLogin: []
+      parameters:
+        - $ref: '#/components/parameters/NovelNumber'
+        - name: rows
+          in: query
+          required: true
+          description: Maximum requested rows. pia-scrap normally sends the metadata episode count.
+          schema: {type: integer, minimum: 1}
+        - name: sort
+          in: query
+          required: false
+          schema: {type: string, enum: [ASC, DESC], default: ASC}
+      responses:
+        '200':
+          description: Episode list in the requested order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EpisodeListResponse'
+        '401': {$ref: '#/components/responses/ErrorResponse'}
+        '403': {$ref: '#/components/responses/ErrorResponse'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /v1/novel/episode:
+    get:
+      tags: [Episodes]
+      operationId: getEpisodeTicket
+      summary: Request an episode access ticket
+      description: |
+        Returns episode/novel metadata, an opaque short-lived `_t` value, and signed
+        CloudFront cookie values used for authorized episode images. Receiving a
+        ticket depends on the caller's legitimate access rights.
+      security:
+        - loginAt: []
+          userKey: []
+          tKey: []
+          lastLogin: []
+      parameters:
+        - name: episode_no
+          in: query
+          required: true
+          schema: {type: integer, minimum: 1}
+      responses:
+        '200':
+          description: Episode ticket.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EpisodeTicketResponse'
+        '401': {$ref: '#/components/responses/ErrorResponse'}
+        '403':
+          description: Authentication failure or legitimate access restriction, such as subscription/purchase requirements.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /v1/novel/episode/content:
+    get:
+      tags: [Episodes]
+      operationId: getEpisodeContent
+      summary: Exchange an episode ticket for chapter content
+      description: |
+        The response can split chapter HTML across `epi_content`, `epi_content2`,
+        `epi_content3`, and further numerically suffixed fields. Consumers should
+        concatenate the base field first and suffixed fields in numeric order.
+        `writer_comment` is separate and is not chapter content.
+      security:
+        - userKey: []
+          tKey: []
+          lastLogin: []
+      parameters:
+        - name: _t
+          in: query
+          required: true
+          description: Opaque ticket returned by `/v1/novel/episode`; treat as a secret.
+          schema: {type: string, minLength: 1, writeOnly: true}
+      responses:
+        '200':
+          description: Episode content.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EpisodeContentResponse'
+        '401': {$ref: '#/components/responses/ErrorResponse'}
+        '403': {$ref: '#/components/responses/ErrorResponse'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+components:
+  securitySchemes:
+    loginAt:
+      type: apiKey
+      in: header
+      name: login-at
+      description: Opaque login token returned as `result.LOGINAT`.
+    userKey:
+      type: apiKey
+      in: cookie
+      name: USERKEY
+      description: Client/session identifier. pia-scrap generates one when absent.
+    tKey:
+      type: apiKey
+      in: cookie
+      name: TKEY
+      description: Session cookie set by the service; treat as a secret.
+    lastLogin:
+      type: apiKey
+      in: cookie
+      name: last_login
+      description: The observed client sends the constant value `basic` on non-login requests.
+  parameters:
+    NovelNumber:
+      name: novel_no
+      in: query
+      required: true
+      schema: {type: integer, minimum: 1}
+  responses:
+    ErrorResponse:
+      description: Error response. HTTP status and envelope fields require more captures.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    RateLimited:
+      description: Too many requests. Honor `Retry-After` when present and retry sequentially with backoff.
+      headers:
+        Retry-After:
+          description: Delay in seconds, if supplied.
+          schema: {type: number, minimum: 0}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+  schemas:
+    ApiEnvelope:
+      type: object
+      properties:
+        statusCode: {type: integer, example: 200}
+        code: {type: string, example: '0000'}
+        errmsg: {type: string, example: ''}
+        errmsgs:
+          type: array
+          items: {type: string}
+        datetime:
+          type: string
+          description: Service timestamp in observed `YYYY-MM-DD HH:mm:ss` form; timezone is unknown.
+          example: '2026-08-10 19:59:44'
+      additionalProperties: true
+    ErrorEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            error: {}
+            result: {}
+          additionalProperties: true
+    UnknownResultEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            result: {}
+          additionalProperties: true
+    LoginRequest:
+      type: object
+      required: [email, passwd]
+      properties:
+        email: {type: string, format: email}
+        passwd: {type: string, format: password, writeOnly: true}
+      additionalProperties: false
+    LoginResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          required: [result]
+          properties:
+            result:
+              type: object
+              required: [LOGINAT]
+              properties:
+                LOGINAT: {type: string, writeOnly: true}
+              additionalProperties: true
+    NovelResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          required: [result]
+          properties:
+            result:
+              $ref: '#/components/schemas/NovelResult'
+    NovelResult:
+      type: object
+      required: [novel]
+      properties:
+        novel: {$ref: '#/components/schemas/Novel'}
+        info: {$ref: '#/components/schemas/NovelEpisodeCounts'}
+        writer_list:
+          type: array
+          items: {$ref: '#/components/schemas/Writer'}
+        tag_list:
+          type: array
+          items: {$ref: '#/components/schemas/Tag'}
+      additionalProperties: true
+    NovelEpisodeCounts:
+      type: object
+      properties:
+        epi_cnt: {type: integer, minimum: 0}
+        free_epi_cnt: {type: integer, minimum: 0}
+        premium_epi_cnt: {type: integer, minimum: 0}
+        ad_epi_cnt: {type: integer, minimum: 0}
+      additionalProperties: true
+    Novel:
+      type: object
+      required: [novel_no, novel_name]
+      properties:
+        novel_no: {type: integer, minimum: 1}
+        novel_name: {type: string}
+        novel_name_trim: {type: string}
+        novel_story: {type: string}
+        novel_img: {type: string, description: Absolute or protocol-relative cover URL.}
+        novel_full_img: {type: string, description: Absolute or protocol-relative full-size cover URL.}
+        novel_locale: {type: string, examples: [EN, ko]}
+        writer_info: {type: string}
+        mem_no: {type: integer}
+        count_epi: {type: integer, minimum: 0}
+        count_comment: {type: integer, minimum: 0}
+        count_good: {type: integer, minimum: 0}
+        count_like: {type: integer, minimum: 0}
+        count_view: {type: integer, minimum: 0}
+        count_word: {type: integer, minimum: 0}
+        new_epi_num: {type: integer}
+        new_epi_open_dt: {$ref: '#/components/schemas/NullableServiceDateTime'}
+        open_dt: {$ref: '#/components/schemas/NullableServiceDateTime'}
+        reg_dt: {$ref: '#/components/schemas/NullableServiceDateTime'}
+        update_dt: {$ref: '#/components/schemas/NullableServiceDateTime'}
+        complete_dt: {$ref: '#/components/schemas/NullableServiceDateTime'}
+        plus_dt: {$ref: '#/components/schemas/NullableServiceDateTime'}
+        premium_dt: {$ref: '#/components/schemas/NullableServiceDateTime'}
+        copyright_dt: {$ref: '#/components/schemas/NullableServiceDateTime'}
+        del_dt: {$ref: '#/components/schemas/NullableServiceDateTime'}
+        detail_trans_dt: {$ref: '#/components/schemas/NullableServiceDateTime'}
+        flag_stat_dt: {$ref: '#/components/schemas/NullableServiceDateTime'}
+        weekly:
+          type: integer
+          description: Observed `0` maps to Random and `127` maps to Daily; other values are unknown.
+          x-confidence: medium
+        flag_complete:
+          type: integer
+          enum: [0, 1]
+          description: `1` means completed; `0` means not completed.
+          x-confidence: high
+        flag_live:
+          type: integer
+          description: `2` means discontinued; `0` is normal/not discontinued. Other values are unknown.
+          x-confidence: high-for-2
+        flag_cate:
+          type: integer
+          description: Observed mapping: `1` Fantasy, `3` Modern, `12` Modern Fantasy.
+          x-confidence: high-for-observed-values
+        flag_detail_trans:
+          type: integer
+          description: Observed `2` means Edited translation and `0` has no edit label; `1` is tentatively Revised.
+          x-confidence: mixed
+        flag_content:
+          type: integer
+          description: Likely `1` original/global content and `0` imported/translated track.
+          x-confidence: medium
+        flag_adult:
+          type: integer
+          description: Observed only as `0` (not Mature); `1` is inferred to mean Mature.
+          x-confidence: medium
+        flag_contest:
+          type: integer
+          description: Likely indicates contest association.
+          x-confidence: medium
+        flag_donation:
+          type: integer
+          description: Likely indicates donation support.
+          x-confidence: low
+        flag_visibility:
+          type: integer
+          description: Observed `1` on publicly visible works.
+          x-confidence: high
+        flag_del:
+          type: integer
+          description: Observed `0` on non-deleted works.
+          x-confidence: high
+        flag_copyright: {type: integer, description: Rights/copyright marker; exact business meaning unknown.}
+        flag_img_policy: {type: integer, description: Image/cover policy state; mapping unknown.}
+        flag_buy: {type: integer, description: Likely direct-purchase eligibility; mapping unknown.}
+        flag_translate: {type: integer, description: Translation workflow/status; mapping unknown.}
+        flag_secondary_creation: {type: integer, description: Likely derivative-creation status; mapping unknown.}
+        flag_out_serve: {type: integer, description: Likely external-distribution status; mapping unknown.}
+        flag_video: {type: integer, description: Likely video association; mapping unknown.}
+        copyright: {type: integer}
+        content_type: {type: integer}
+        common_content_type: {type: integer}
+        cate_num1: {type: integer}
+        cate_num2: {type: integer}
+        sort_no: {type: integer}
+        free_max_epi_num: {type: integer}
+        not_auth_epi_cnt: {type: integer}
+        not_login_epi_cnt: {type: integer}
+        ad_epi_rate: {type: integer}
+        pm_epi_rate: {type: integer}
+      additionalProperties: true
+    Writer:
+      type: object
+      properties:
+        idx: {type: integer}
+        novel_no: {type: integer}
+        mem_no: {type: integer}
+        writer_name: {type: string}
+        flag_type:
+          type: integer
+          description: Observed `0` for main/romanized name and `1` for Korean/local alternate name.
+          x-confidence: high
+      additionalProperties: true
+    Tag:
+      type: object
+      properties:
+        idx: {type: integer}
+        novel_no: {type: integer}
+        tag_no: {type: integer}
+        tag_name: {type: string}
+        sort_no: {type: integer}
+      additionalProperties: true
+    NovelListResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            result:
+              type: object
+              properties:
+                list:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      novel: {$ref: '#/components/schemas/Novel'}
+                    additionalProperties: true
+                total_count: {type: integer, minimum: 0}
+              additionalProperties: true
+    EpisodeListResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          required: [result]
+          properties:
+            result:
+              type: object
+              required: [list]
+              properties:
+                list:
+                  type: array
+                  items: {$ref: '#/components/schemas/Episode'}
+                total_count: {type: integer, minimum: 0}
+              additionalProperties: true
+    Episode:
+      type: object
+      required: [episode_no, novel_no, epi_num, epi_title]
+      properties:
+        episode_no: {type: integer, minimum: 1}
+        novel_no: {type: integer, minimum: 1}
+        epi_num: {type: integer, minimum: 0}
+        epi_title: {type: string}
+        epi_img: {type: string}
+        episode_info: {type: [string, 'null']}
+        open_dt: {$ref: '#/components/schemas/NullableServiceDateTime'}
+        sort_no: {type: integer}
+        count_comment: {type: integer, minimum: 0}
+        count_good: {type: integer, minimum: 0}
+        count_view: {type: integer, minimum: 0}
+        count_word: {type: integer, minimum: 0}
+        episode_count_comment: {type: integer, minimum: 0}
+        episode_count_good: {type: integer, minimum: 0}
+        episode_count_view: {type: integer, minimum: 0}
+        flag_adult: {type: integer}
+        flag_comment: {type: integer}
+        flag_complete: {type: integer}
+        flag_content: {type: integer}
+        flag_detail_trans: {type: integer}
+        flag_epi_img: {type: integer}
+        flag_free: {type: integer}
+        flag_grade: {type: integer}
+        flag_hide_comment: {type: integer}
+        flag_open: {type: integer}
+        flag_translate: {type: integer}
+        flag_type: {type: integer}
+        flag_update: {type: integer}
+      additionalProperties: true
+    EpisodeTicketResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          required: [result]
+          properties:
+            result:
+              type: object
+              required: [data]
+              properties:
+                novel: {$ref: '#/components/schemas/Novel'}
+                data: {$ref: '#/components/schemas/Episode'}
+                flag_good: {type: integer}
+                _t:
+                  type: string
+                  writeOnly: true
+                  description: Opaque episode-content ticket; sensitive and likely short-lived.
+                signed_key:
+                  $ref: '#/components/schemas/SignedImageCookies'
+              additionalProperties: true
+    SignedImageCookies:
+      type: object
+      description: Sensitive CloudFront cookie values for authorized image hosts.
+      properties:
+        CloudFront-Policy: {type: string, writeOnly: true}
+        CloudFront-Key-Pair-Id: {type: string, writeOnly: true}
+        CloudFront-Signature: {type: string, writeOnly: true}
+      additionalProperties: false
+    EpisodeContentResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          required: [result]
+          properties:
+            result:
+              type: object
+              required: [data]
+              properties:
+                data:
+                  type: object
+                  properties:
+                    epi_content:
+                      type: string
+                      description: Base HTML content segment.
+                    writer_comment:
+                      type: string
+                      description: Author comment; separate from the episode body.
+                  patternProperties:
+                    '^epi_content[2-9][0-9]*$':
+                      type: string
+                      description: Additional HTML segment; concatenate by numeric suffix.
+                  additionalProperties: true
+              additionalProperties: true
+    NullableServiceDateTime:
+      type: [string, 'null']
+      description: Service datetime or sentinel such as `0000-00-00 00:00:00`; timezone is unknown.
