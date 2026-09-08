@@ -281,6 +281,45 @@ def test_refresh_keeps_in_memory_token_when_persistence_fails(monkeypatch, caplo
     assert "refreshed in memory, but could not be stored" in caplog.text
 
 
+@pytest.mark.parametrize("method_name", ["login", "refresh"])
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"result": []},
+        {"result": {}},
+        {"result": {"LOGINAT": None}},
+        {"result": {"LOGINAT": ""}},
+        {"result": "fresh-token"},
+        ["unexpected"],
+        {"LOGINAT": "fresh-token"},
+    ],
+)
+def test_login_and_refresh_reject_malformed_authentication_payloads(
+    monkeypatch, method_name, body
+):
+    client = make_client_without_init()
+    client._auth_lock = threading.RLock()
+    client.s = object()
+    client.timeout = 30
+    client.tokens = api.Tokens(login_at="old-token")
+    client.email = "user@example.test"
+    client.password = "pw"
+    saves = []
+    monkeypatch.setattr(
+        api,
+        "request_with_retries",
+        lambda *args, **kwargs: FakeResponse(200, body),
+    )
+    monkeypatch.setattr(api, "load_config", lambda: {})
+    monkeypatch.setattr(api, "save_config", lambda config: saves.append(config) or True)
+
+    with pytest.raises(RuntimeError, match="did not contain a login token"):
+        getattr(client, method_name)()
+
+    assert client.tokens.login_at == "old-token"
+    assert saves == []
+
+
 def test_request_does_not_refresh_for_forbidden_access():
     session = FakeSession([
         FakeResponse(403, {"error": {"code": "SUBSCRIPTION_REQUIRED", "message": "Premium access required"}}),
@@ -431,6 +470,54 @@ def test_my_library_does_not_return_partial_ids_on_cancel(monkeypatch):
         client.my_library()
 
 
+def test_my_library_skips_malformed_rows_and_preserves_order(monkeypatch):
+    client = make_client_without_init()
+    client.s = object()
+    client.timeout = 30
+    client.tokens = api.Tokens(login_at="login")
+    client.refresh = lambda: None
+    client.login = lambda: None
+    client._on_rate_limit = lambda: None
+    monkeypatch.setattr(
+        api,
+        "request_with_retries",
+        lambda *args, **kwargs: FakeResponse(200, {
+            "result": {"list": [
+                {"novel": {"novel_no": 10}},
+                {"novel": None},
+                "not-a-dict",
+                {"unexpected": True},
+                {"novel": {"novel_no": "11"}},
+                {"novel": {"novel_no": 0}},
+                {"novel": {"novel_no": -3}},
+                {"novel": {"novel_no": None}},
+                {"novel": {"novel_no": 10}},
+                {"novel": {"novel_no": 12, "novel_locale": "EN"}},
+                {"novel": {"novel_no": 13, "novel_locale": "ko"}},
+            ]}
+        }),
+    )
+
+    assert client.my_library() == [10, 11, 12, 13]
+
+
+def test_my_library_returns_empty_on_unexpected_response_shape(monkeypatch):
+    client = make_client_without_init()
+    client.s = object()
+    client.timeout = 30
+    client.tokens = api.Tokens()
+    client.refresh = lambda: None
+    client.login = lambda: None
+    client._on_rate_limit = lambda: None
+    monkeypatch.setattr(
+        api,
+        "request_with_retries",
+        lambda *args, **kwargs: FakeResponse(200, ["unexpected"]),
+    )
+
+    assert client.my_library() == []
+
+
 def test_fetch_episode_matches_captured_ticket_and_split_content_shapes(captured_api_samples):
     episode = captured_api_samples["episode"]
     client = make_client_without_init()
@@ -556,6 +643,81 @@ def test_parallel_fetch_rejects_invalid_worker_count():
     client = make_client_without_init()
     with pytest.raises(ValueError, match="at least 1"):
         client.fetch_episodes_parallel([], max_workers=0)
+
+
+def test_parallel_fetch_does_not_submit_when_already_cancelled():
+    event = threading.Event()
+    event.set()
+    client = make_client_without_init()
+    client.cancel_event = event
+    client.fetch_episode = lambda *args, **kwargs: pytest.fail(
+        "fetch_episode should not run when cancel is already set"
+    )
+
+    with pytest.raises(
+        api.DownloadCancelled, match="Download stopped by cancellation request"
+    ):
+        client.fetch_episodes_parallel(
+            [{"epi_title": "one"}, {"epi_title": "two"}],
+            max_workers=2,
+            on_complete_cb=lambda result: pytest.fail(
+                "on_complete_cb should not run when cancel is already set"
+            ),
+        )
+
+
+def test_parallel_fetch_stores_completed_chapter_before_honoring_cancel():
+    event = threading.Event()
+    client = make_client_without_init()
+    client.cancel_event = event
+    completed = []
+
+    def fetch_episode(episode, idx):
+        if episode["epi_title"] == "one":
+            event.set()
+            return {"epi_title": "one", "html": "ok", "epi_no": 1}
+        time.sleep(0.2)
+        return {"epi_title": episode["epi_title"], "html": "other", "epi_no": idx}
+
+    client.fetch_episode = fetch_episode
+
+    with pytest.raises(api.DownloadCancelled, match="Download pool stopped"):
+        client.fetch_episodes_parallel(
+            [{"epi_title": "one"}, {"epi_title": "two"}],
+            max_workers=2,
+            on_complete_cb=completed.append,
+        )
+
+    stored_one = [item for item in completed if item.get("epi_title") == "one"]
+    assert stored_one
+    assert stored_one[0]["html"] == "ok"
+
+
+def test_parallel_fetch_stores_finished_chapter_when_sibling_raises_cancel():
+    client = make_client_without_init()
+    completed = []
+    html_done = threading.Event()
+
+    def fetch_episode(episode, idx):
+        if episode["epi_title"] == "ok":
+            result = {"epi_title": "ok", "html": "ok", "epi_no": 1}
+            html_done.set()
+            return result
+        html_done.wait(1.0)
+        raise api.DownloadCancelled("Request cancelled during wait.")
+
+    client.fetch_episode = fetch_episode
+
+    with pytest.raises(api.DownloadCancelled, match="Request cancelled during wait"):
+        client.fetch_episodes_parallel(
+            [{"epi_title": "ok"}, {"epi_title": "raise"}],
+            max_workers=2,
+            on_complete_cb=completed.append,
+        )
+
+    stored_ok = [item for item in completed if item.get("epi_title") == "ok"]
+    assert stored_ok
+    assert stored_ok[0]["html"] == "ok"
 
 
 class FakeImageResponse:

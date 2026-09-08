@@ -6,7 +6,7 @@ A note next to code is a comment when deleting that code would make the note mea
 
 ## Cancel
 
-Cancel by calling `sleep_cooperative` and letting `DownloadCancelled` propagate. Check the event before starting a novel or submitting pool work.
+Cancel by calling `sleep_cooperative` and letting `DownloadCancelled` propagate. Check the event before starting a novel or submitting pool work. A completed pool future is stored before cancel is honored.
 
 `failed` counts skip and hard-failure statuses. `cancelled` is a separate flag and result status.
 
@@ -52,11 +52,11 @@ Fetch and embed through `fetch_image`. Re-check redirect targets against the all
 
 ## Untrusted input
 
-Escape remote and user-provided text before it enters generated HTML. Validate API payload shape before nested indexing.
+Escape remote and user-provided text before it enters generated HTML. Validate API payload shape before nested indexing. A bad row in a list endpoint is skipped. A bad auth body raises. `my_library` returns liked IDs of any locale. `recent_novels` is Korean K-Premium only.
 
 ## Constraints
 
-API stays in `api.py`, queue in `engine.py`, parse in `novel.py`, output in `builder.py` / `epub.py`. `main.py` has no business logic. Preserve the engine callback and cancellation interfaces. Shared options stay equivalent between CLI and GUI. Email and password are both provided or neither. Option changes update `README.md`. Library modules use `logging.getLogger("pia_scrap")`. Tk widgets update on the UI thread; network and file work stay on the worker.
+API stays in `api.py`, queue in `engine.py`, parse in `novel.py`, output in `builder.py` / `epub.py`. Engine calls `build_epub` and `build_txt`. Those two own skip and chapter fetch. `main.py` has no business logic. Preserve the engine callback and cancellation interfaces. Shared options stay equivalent between CLI and GUI. Email and password are both provided or neither. Option changes update `README.md`. Library modules use `logging.getLogger("pia_scrap")`. Tk widgets update on the UI thread; network and file work stay on the worker.
 
 ## Tests
 

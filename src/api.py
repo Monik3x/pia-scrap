@@ -86,7 +86,7 @@ class NovelpiaClient:
                 cancel_event=self.cancel_event
             )
             r.raise_for_status()
-            self.tokens.login_at = r.json()["result"]["LOGINAT"]
+            self.tokens.login_at = _login_at_from_payload(r.json())
             try:
                 self.tokens.tkey = self.s.cookies.get("TKEY")
                 self.tokens.userkey = self.s.cookies.get("USERKEY")
@@ -104,7 +104,7 @@ class NovelpiaClient:
                 cancel_event=self.cancel_event
             )
             r.raise_for_status()
-            self.tokens.login_at = r.json()["result"]["LOGINAT"]
+            self.tokens.login_at = _login_at_from_payload(r.json())
             cfg = load_config()
             cfg["login_at"] = self.tokens.login_at
             if not save_config(cfg):
@@ -205,17 +205,11 @@ class NovelpiaClient:
             r = self._api_request("GET", url, params=params)
             r.raise_for_status()
             data = r.json()
-            
-            res_block = data.get("result") or {}
-            items = res_block.get("list", []) if isinstance(res_block, dict) else []
+
+            items = _result_list(data)
             if not items:
                 break
-                
-            for item in items:
-                novel_no = item.get("novel", {}).get("novel_no")
-                if novel_no:
-                    novel_ids.append(int(novel_no))
-                    
+            novel_ids.extend(_novel_ids_from_list_items(items))
             if len(items) < 100:
                 break
                 
@@ -233,32 +227,13 @@ class NovelpiaClient:
         r.raise_for_status()
         data = r.json()
 
-        if not isinstance(data, dict):
-            return []
-        result = data.get("result") or {}
-        items = result.get("list", []) if isinstance(result, dict) else []
-        if not isinstance(items, list):
-            return []
-
-        novel_ids = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            novel = item.get("novel") or {}
-            if not isinstance(novel, dict):
-                continue
-            # The global API identifies Korean K-Premium titles by locale.
-            if str(novel.get("novel_locale") or "").casefold() != "ko":
-                continue
-            novel_no = novel.get("novel_no")
-            try:
-                novel_id = int(novel_no)
-            except (TypeError, ValueError):
-                continue
-            if novel_id > 0:
-                novel_ids.append(novel_id)
-
-        return unique_in_order(novel_ids)
+        # The global API identifies Korean K-Premium titles by locale.
+        return unique_in_order(
+            _novel_ids_from_list_items(
+                _result_list(data),
+                novel_ok=lambda novel: str(novel.get("novel_locale") or "").casefold() == "ko",
+            )
+        )
 
     def episode_ticket(self, episode_no: int) -> Dict:
         url = f"{const.API_BASE}/v1/novel/episode"
@@ -506,25 +481,90 @@ class NovelpiaClient:
                 store_result(idx, result)
             return results
 
+        # Already cancelled: skip fetch_episode and on_complete_cb.
+        if self.cancel_event and self.cancel_event.is_set():
+            raise DownloadCancelled("Download stopped by cancellation request.")
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_idx = {
                 executor.submit(self.fetch_episode, ep, i+1): i 
                 for i, ep in enumerate(ep_list)
             }
+
+            def store_finished_results() -> None:
+                for fut, done_idx in future_to_idx.items():
+                    if not fut.done() or fut.cancelled() or results[done_idx]:
+                        continue
+                    try:
+                        done_res = fut.result()
+                    except Exception:
+                        continue
+                    if isinstance(done_res, dict):
+                        store_result(done_idx, done_res)
+
             try:
                 for future in concurrent.futures.as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    try:
+                        res = future.result()
+                    except DownloadCancelled:
+                        store_finished_results()
+                        raise
+                    store_result(idx, res)
+                    # Keep a finished chapter so on_complete_cb can write the update cache.
                     if self.cancel_event and self.cancel_event.is_set():
                         raise DownloadCancelled("Download pool stopped by cancellation request.")
-
-                    idx = future_to_idx[future]
-                    res = future.result()
-                    store_result(idx, res)
             except (KeyboardInterrupt, DownloadCancelled) as e:
                 logger.warning(f"Fetch process interrupted gracefully: {e}")
+                if isinstance(e, DownloadCancelled):
+                    store_finished_results()
                 for fut in future_to_idx:
                     fut.cancel()
                 raise
         return results
+
+def _result_list(payload: Any) -> List[Any]:
+    if not isinstance(payload, dict):
+        return []
+    result = payload.get("result") or {}
+    items = result.get("list", []) if isinstance(result, dict) else []
+    return items if isinstance(items, list) else []
+
+
+def _novel_ids_from_list_items(
+    items: Any,
+    *,
+    novel_ok: Optional[Callable[[Dict[str, Any]], bool]] = None,
+) -> List[int]:
+    novel_ids: List[int] = []
+    if not isinstance(items, list):
+        return novel_ids
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        novel = item.get("novel") or {}
+        if not isinstance(novel, dict):
+            continue
+        if novel_ok is not None and not novel_ok(novel):
+            continue
+        try:
+            novel_id = int(novel.get("novel_no"))
+        except (TypeError, ValueError):
+            continue
+        if novel_id > 0:
+            novel_ids.append(novel_id)
+    return novel_ids
+
+
+def _login_at_from_payload(payload: Any) -> str:
+    result = payload.get("result") if isinstance(payload, dict) else None
+    login_at = result.get("LOGINAT") if isinstance(result, dict) else None
+    if not isinstance(login_at, str) or not login_at.strip():
+        raise RuntimeError(
+            "Authentication response did not contain a login token."
+        )
+    return login_at
+
 
 def _wait_for_retry(seconds: float, cancel_event, reason: str) -> None:
     if seconds <= 0:
