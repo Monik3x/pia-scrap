@@ -3,3 +3,4 @@ ebooklib==0.18
 curl-cffi
 python-dotenv==1.0.*
 customtkinter==5.2.*
+pytest==8.*

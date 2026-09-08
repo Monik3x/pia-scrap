@@ -1,0 +1,132 @@
+{
+  "novels": [
+    {
+      "payload": {
+        "statusCode": 200,
+        "result": {
+          "novel": {
+            "novel_no": 86,
+            "novel_name": "The Civil Servant in a Romance Fantasy Novel",
+            "novel_story": "Captured API-shape fixture.",
+            "flag_complete": 0,
+            "flag_live": 0,
+            "count_epi": 1577
+          },
+          "info": {"epi_cnt": 1577},
+          "writer_list": [
+            {"writer_name": "boreujigin", "flag_type": 0},
+            {"writer_name": "보르지긴", "flag_type": 1}
+          ],
+          "tag_list": [{"tag_name": "Harem"}, {"tag_name": "Light Novel"}]
+        }
+      },
+      "expected": {"novel_id": 86, "title": "The Civil Servant in a Romance Fantasy Novel", "author": "boreujigin", "episode_count": 1577, "status": "Ongoing", "first_tag": "Harem"}
+    },
+    {
+      "payload": {
+        "statusCode": 200,
+        "result": {
+          "novel": {"novel_no": 1482, "novel_name": "Damn This Academy", "flag_complete": 0, "flag_live": 2, "count_epi": 294},
+          "info": {"epi_cnt": 294},
+          "writer_list": [{"writer_name": "amheukgorani", "flag_type": 0}, {"writer_name": "암흑고라니", "flag_type": 1}],
+          "tag_list": [{"tag_name": "Harem"}, {"tag_name": "Academy"}]
+        }
+      },
+      "expected": {"novel_id": 1482, "title": "Damn This Academy", "author": "amheukgorani", "episode_count": 294, "status": "Discontinued", "first_tag": "Harem"}
+    },
+    {
+      "payload": {
+        "statusCode": 200,
+        "result": {
+          "novel": {"novel_no": 2894, "novel_name": "I Became a Succubus the Day Before My Debut", "flag_complete": 0, "flag_live": 2, "count_epi": 137},
+          "info": {"epi_cnt": 137},
+          "writer_list": [{"writer_name": "badakokobol", "flag_type": 0}, {"writer_name": "바다코코볼", "flag_type": 1}],
+          "tag_list": [{"tag_name": "Gender Bender"}, {"tag_name": "GL"}]
+        }
+      },
+      "expected": {"novel_id": 2894, "title": "I Became a Succubus the Day Before My Debut", "author": "badakokobol", "episode_count": 137, "status": "Discontinued", "first_tag": "Gender Bender"}
+    },
+    {
+      "payload": {
+        "statusCode": 200,
+        "result": {
+          "novel": {"novel_no": 3818, "novel_name": "Me? An Underworld Boss?", "flag_complete": 1, "flag_live": 0, "count_epi": 282},
+          "info": {"epi_cnt": 282},
+          "writer_list": [{"writer_name": "sonapeunsaram", "flag_type": 0}, {"writer_name": "손아픈사람", "flag_type": 1}],
+          "tag_list": [{"tag_name": "Harem"}, {"tag_name": "Cyberpunk"}]
+        }
+      },
+      "expected": {"novel_id": 3818, "title": "Me? An Underworld Boss?", "author": "sonapeunsaram", "episode_count": 282, "status": "Completed", "first_tag": "Harem"}
+    },
+    {
+      "payload": {
+        "statusCode": 200,
+        "result": {
+          "novel": {"novel_no": 3843, "novel_name": "Beyond the Abyssline", "flag_complete": 0, "flag_live": 0, "count_epi": 374},
+          "info": {"epi_cnt": 374},
+          "writer_list": [{"writer_name": "FriedGalacticChicken", "flag_type": 0}],
+          "tag_list": [{"tag_name": "Reincarnation"}, {"tag_name": "Adventure"}]
+        }
+      },
+      "expected": {"novel_id": 3843, "title": "Beyond the Abyssline", "author": "FriedGalacticChicken", "episode_count": 374, "status": "Ongoing", "first_tag": "Reincarnation"}
+    },
+    {
+      "payload": {
+        "statusCode": 200,
+        "result": {
+          "novel": {"novel_no": 4265, "novel_name": "The Dark Fantasy Doctor is Mistaken for a Saint", "flag_complete": 0, "flag_live": 0, "count_epi": 179},
+          "info": {"epi_cnt": 179},
+          "writer_list": [{"writer_name": "sodokseongaeja", "flag_type": 0}, {"writer_name": "소독성애자", "flag_type": 1}],
+          "tag_list": [{"tag_name": "Harem"}, {"tag_name": "Isekai"}]
+        }
+      },
+      "expected": {"novel_id": 4265, "title": "The Dark Fantasy Doctor is Mistaken for a Saint", "author": "sodokseongaeja", "episode_count": 179, "status": "Ongoing", "first_tag": "Harem"}
+    },
+    {
+      "payload": {
+        "statusCode": 200,
+        "result": {
+          "novel": {"novel_no": 4702, "novel_name": "Tales Of The Three Skies", "flag_complete": 0, "flag_live": 0, "count_epi": 117},
+          "info": {"epi_cnt": 117},
+          "writer_list": [{"writer_name": "FriedGalacticChicken", "flag_type": 0}],
+          "tag_list": [{"tag_name": "Light Novel"}, {"tag_name": "Character Growth"}]
+        }
+      },
+      "expected": {"novel_id": 4702, "title": "Tales Of The Three Skies", "author": "FriedGalacticChicken", "episode_count": 117, "status": "Ongoing", "first_tag": "Light Novel"}
+    }
+  ],
+  "episode": {
+    "list_payload": {
+      "statusCode": 200,
+      "result": {
+        "list": [{"episode_no": 21443, "novel_no": 86, "epi_num": 0, "epi_title": "Prologue", "flag_open": 1}],
+        "total_count": 1577
+      }
+    },
+    "ticket_payload": {
+      "statusCode": 200,
+      "result": {
+        "novel": {"novel_no": 86},
+        "data": {"episode_no": 21443, "epi_num": 0, "epi_title": "Prologue"},
+        "flag_good": 0,
+        "_t": "fixture-token",
+        "signed_key": {
+          "CloudFront-Policy": "fixture-policy",
+          "CloudFront-Key-Pair-Id": "fixture-key-id",
+          "CloudFront-Signature": "fixture-signature"
+        }
+      }
+    },
+    "content_payload": {
+      "statusCode": 200,
+      "result": {
+        "data": {
+          "epi_content": "<p>first</p>",
+          "writer_comment": "must not become chapter content",
+          "epi_content2": "<p>second</p>",
+          "epi_content3": "<p>third</p>"
+        }
+      }
+    }
+  }
+}

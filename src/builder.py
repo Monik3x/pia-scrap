@@ -119,6 +119,7 @@ def _write_episode_cache(cache_file: str, result: Dict, revision) -> None:
     epi_no = result.get("epi_no")
     try:
         cache_record = dict(result)
+        # Strip CloudFront credentials attached by api.py before persisting to disk.
         cache_record.pop("signed_key", None)
         cache_record[EPISODE_REVISION_FIELD] = revision
         write_json_atomic(cache_file, cache_record)
