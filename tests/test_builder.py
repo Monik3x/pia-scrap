@@ -125,6 +125,33 @@ def test_build_txt_fetches_then_writes_all_files(monkeypatch, tmp_path, novel_da
     assert progress[-1][:2] == (2, 2)
 
 
+def test_build_txt_removes_stale_chapter_files(monkeypatch, tmp_path, novel_data, episodes):
+    monkeypatch.setattr(
+        builder,
+        "fetch_novel_and_episodes",
+        lambda *args, **kwargs: (novel_data, episodes[:1], _metadata(novel_data)),
+    )
+    book_dir = tmp_path / "a-test-novel"
+    book_dir.mkdir()
+    (book_dir / ".novel_id").write_text("42", encoding="utf-8")
+    (book_dir / "1_Old Title.txt").write_text("stale first", encoding="utf-8")
+    (book_dir / "2_Second.txt").write_text("leftover later chapter", encoding="utf-8")
+    (book_dir / "notes.txt").write_text("keep me", encoding="utf-8")
+    client = DummyFetchClient()
+
+    output, title, count = builder.build_txt(
+        client, 42, str(tmp_path), update_mode=True
+    )
+
+    assert output == str(book_dir)
+    assert title == "A Test / Novel"
+    assert count == 1
+    assert (book_dir / "1_First _ Chapter.txt").read_text(encoding="utf-8") == "body 101"
+    assert not (book_dir / "1_Old Title.txt").exists()
+    assert not (book_dir / "2_Second.txt").exists()
+    assert (book_dir / "notes.txt").read_text(encoding="utf-8") == "keep me"
+
+
 @pytest.mark.parametrize("update_mode", [False, True])
 def test_build_txt_is_all_or_nothing_on_fetch_failure(
     monkeypatch, tmp_path, novel_data, episodes, update_mode

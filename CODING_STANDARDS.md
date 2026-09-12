@@ -35,6 +35,7 @@ Tokens and cookies stay out of `last_run_report.txt`.
 ## Output
 
 TXT always rewrites chapter files. Only EPUB returns `None` as up to date.
+After a successful TXT write, remove leftover `N_*.txt` files that were not just written.
 
 Config, metadata, cache records, and the final EPUB go through the atomic writers. A failed build leaves the previous artifact in place and does not mark the book updated. `metadata.json` is the update-mode commit marker, so write it last.
 

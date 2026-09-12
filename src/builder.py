@@ -20,6 +20,28 @@ from src.novel import NovelMetadata, fetch_novel_and_episodes, html_from_episode
 logger = logging.getLogger("pia_scrap")
 
 
+def _is_txt_chapter_filename(name: str) -> bool:
+    prefix, sep, rest = name.partition("_")
+    return bool(sep and prefix.isdigit() and rest.endswith(".txt"))
+
+
+def _remove_stale_txt_chapters(book_dir: str, keep_names: List[str]) -> None:
+    keep = set(keep_names)
+    try:
+        names = os.listdir(book_dir)
+    except OSError as exc:
+        logger.warning(f"Could not list TXT chapter files in {book_dir}: {exc}")
+        return
+    for name in names:
+        if name in keep or not _is_txt_chapter_filename(name):
+            continue
+        path = os.path.join(book_dir, name)
+        try:
+            os.remove(path)
+        except OSError as exc:
+            logger.warning(f"Could not remove leftover TXT chapter {path}: {exc}")
+
+
 def _epub_chapter_count(epub_path: str) -> int:
     """Return the number of generated chapter documents, or -1 if invalid."""
     try:
@@ -354,6 +376,7 @@ def build_txt(client, novel_id, out_dir, max_chapters=None, threads=1,
     ensure_dir(book_dir)
     if status_cb:
         status_cb("Saving TXT files to disk...")
+    written_names = []
     for i, res in enumerate(fetched_results, 1):
 
         html_text = res["html"]
@@ -363,7 +386,10 @@ def build_txt(client, novel_id, out_dir, max_chapters=None, threads=1,
         text = soup.get_text("\n")
 
         fname = f"{i}_{sanitize_filename(epi_title)}.txt"
+        written_names.append(fname)
         write_text_atomic(os.path.join(book_dir, fname), text)
+
+    _remove_stale_txt_chapters(book_dir, written_names)
 
     if status_cb:
         status_cb("Writing metadata files...")
