@@ -57,6 +57,9 @@ class NovelMetadata:
     status: str
     description: str
     episode_count: int
+    free_episode_count: int
+    ad_episode_count: int
+    premium_episode_count: int
     tags: List[str]
 
 
@@ -139,6 +142,9 @@ def parse_novel_metadata(
         episode_count = max(0, int(raw_episode_count or 0))
     except (TypeError, ValueError):
         episode_count = 0
+    free_episode_count = _info_count(info, "free_epi_cnt")
+    ad_episode_count = _info_count(info, "ad_epi_cnt")
+    premium_episode_count = _info_count(info, "premium_epi_cnt")
 
     raw_description = nv.get("novel_story")
     description = raw_description.strip() if isinstance(raw_description, str) else ""
@@ -170,6 +176,9 @@ def parse_novel_metadata(
         status=status,
         description=description,
         episode_count=episode_count,
+        free_episode_count=free_episode_count,
+        ad_episode_count=ad_episode_count,
+        premium_episode_count=premium_episode_count,
         tags=tags,
     )
 
@@ -223,13 +232,11 @@ def fetch_novel_and_episodes(
     except NoMetadataError as exc:
         raise NoMetadataError(f"Novel {novel_id} returned no metadata.") from exc
 
-    info = (data_novel.get("result") or {}).get("info") if isinstance(data_novel, dict) else None
-    ad_cnt = _info_count(info, "ad_epi_cnt")
-    premium_cnt = _info_count(info, "premium_epi_cnt")
     logger.info(
         f"title='{metadata.title}' author='{metadata.author}' "
         f"chapter={metadata.episode_count} status={metadata.status} "
-        f"ad={ad_cnt} premium={premium_cnt}"
+        f"free={metadata.free_episode_count} ad={metadata.ad_episode_count} "
+        f"premium={metadata.premium_episode_count}"
     )
 
     try:

@@ -118,6 +118,33 @@ def test_parse_novel_metadata_matches_captured_api_shapes(captured_api_samples):
         assert metadata.tags[0] == expected["first_tag"]
 
 
+def test_parse_novel_metadata_reads_live_info_counts():
+    metadata = parse_novel_metadata(
+        {
+            "result": {
+                "novel": {
+                    "novel_no": 1624,
+                    "novel_name": "Little Raccoon Spirit",
+                    "count_epi": 450,
+                    "flag_complete": 1,
+                },
+                "info": {
+                    "epi_cnt": 450,
+                    "free_epi_cnt": 31,
+                    "ad_epi_cnt": 70,
+                    "premium_epi_cnt": 349,
+                },
+                "writer_list": [{"writer_name": "geomeunhakja"}],
+            }
+        }
+    )
+
+    assert metadata.episode_count == 450
+    assert metadata.free_episode_count == 31
+    assert metadata.ad_episode_count == 70
+    assert metadata.premium_episode_count == 349
+
+
 def test_fetch_novel_and_episodes_accepts_captured_prologue_shape(captured_api_samples):
     novel_case = captured_api_samples["novels"][0]
     episode_payload = captured_api_samples["episode"]["list_payload"]
@@ -252,6 +279,9 @@ def test_user_subscription_status_paid_free_unknown():
         "result": {"login": {"mem_plus_type": 1}},
     }) == "paid"
     assert user_subscription_status({
+        "result": {"login": {"mem_plus_type": 2}},
+    }) == "paid"
+    assert user_subscription_status({
         "result": {"login": {"mem_plus_type": "0"}},
     }) == "free"
     assert user_subscription_status({}) == "unknown"
@@ -263,7 +293,12 @@ def test_fetch_novel_and_episodes_logs_account_and_counts(novel_data, caplog):
     novel_payload = {
         "result": {
             "novel": novel_data["result"]["novel"],
-            "info": {"epi_cnt": 2, "ad_epi_cnt": 4, "premium_epi_cnt": 10},
+            "info": {
+                "epi_cnt": 2,
+                "free_epi_cnt": 1,
+                "ad_epi_cnt": 4,
+                "premium_epi_cnt": 10,
+            },
             "writer_list": novel_data["result"]["writer_list"],
             "tag_list": novel_data["result"]["tag_list"],
         }
@@ -292,4 +327,4 @@ def test_fetch_novel_and_episodes_logs_account_and_counts(novel_data, caplog):
         fetch_novel_and_episodes(client, 42)
 
     assert "account=free nick='tester'" in caplog.text
-    assert "ad=4 premium=10" in caplog.text
+    assert "free=1 ad=4 premium=10" in caplog.text

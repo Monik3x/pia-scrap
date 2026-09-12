@@ -86,8 +86,11 @@ paths:
       operationId: getCurrentMember
       summary: Get the current authenticated member
       description: |
-        Subscription present means paid. Otherwise `mem_plus_type != 0` is paid
-        and `0` is free. pia-scrap also uses this call as an authentication check.
+        Requires the `Login-At` header. A browser address-bar GET without it
+        returns HTTP 404 `code` `9999` / `NOT FOUND`.
+        Live `result` includes `login` and may omit `subscription`; paid is
+        `mem_plus_type != 0` (`0` free; observed `1` and `2` paid). pia-scrap
+        also uses this call as an authentication check.
       security:
         - loginAt: []
           userKey: []
@@ -102,6 +105,7 @@ paths:
                 $ref: '#/components/schemas/MeResultEnvelope'
         '401': {$ref: '#/components/responses/ErrorResponse'}
         '403': {$ref: '#/components/responses/ErrorResponse'}
+        '404': {$ref: '#/components/responses/ErrorResponse'}
         '429': {$ref: '#/components/responses/RateLimited'}
   /v1/novel:
     get:
