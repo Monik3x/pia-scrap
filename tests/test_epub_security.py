@@ -62,7 +62,7 @@ def test_image_fetch_uses_image_headers_not_json_session_headers():
 
 @pytest.mark.parametrize(
     "host",
-    ["global.novelpia.com", "d.novelpia.com"],
+    ["global.novelpia.com", "d.novelpia.com", "images.novelpia.com"],
 )
 def test_session_image_fetch_sends_only_session_cookies(host):
     session = FakeSession([FakeResponse()])

@@ -50,6 +50,9 @@ def test_image_url_allowlist_is_exact_and_https_only():
     assert helper.is_approved_image_url(
         "https://d.novelpia.com/imagebox/80/804a58cc60faed71c0e370df07d17073_499547.png"
     )
+    assert helper.is_approved_image_url(
+        "https://images.novelpia.com/imagebox/cover/11576a6b7d10e5a37598da89dfa7b3b6_369320_ori.wimg"
+    )
     assert helper.is_approved_image_url("https://gn.novelpia.com/a.jpg")
     assert helper.is_approved_image_url("https://img.novelpia.com/a.jpg")
     assert not helper.is_approved_image_url("http://image.novelpia.com/a.jpg")

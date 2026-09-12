@@ -6,6 +6,7 @@ IMG_BASE_HTTPS = "https:"
 IMAGE_HOST_COOKIE_POLICY = {
     "global.novelpia.com": "session",
     "d.novelpia.com": "session",
+    "images.novelpia.com": "session",
     "gn.novelpia.com": "signed",
     "img.novelpia.com": "signed",
     "image.novelpia.com": "signed",
