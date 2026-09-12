@@ -100,6 +100,7 @@ class NovelpiaClient:
                 self.tokens.userkey = self.s.cookies.get("USERKEY")
             except Exception:
                 pass
+            self._persist_tokens()
             return self.tokens.login_at
 
     def refresh(self) -> Optional[str]:
@@ -113,13 +114,20 @@ class NovelpiaClient:
             )
             r.raise_for_status()
             self.tokens.login_at = _login_at_from_payload(r.json())
-            cfg = load_config()
-            cfg["login_at"] = self.tokens.login_at
-            if not save_config(cfg):
-                logger.warning(
-                    "Authentication token refreshed in memory, but could not be stored."
-                )
+            self._persist_tokens()
             return self.tokens.login_at
+
+    def _persist_tokens(self) -> None:
+        cfg = load_config()
+        cfg["login_at"] = self.tokens.login_at
+        if self.tokens.userkey:
+            cfg["userkey"] = self.tokens.userkey
+        if self.tokens.tkey:
+            cfg["tkey"] = self.tokens.tkey
+        if not save_config(cfg):
+            logger.warning(
+                "Authentication token refreshed in memory, but could not be stored."
+            )
 
     def _on_rate_limit(self):
         old = self.throttle

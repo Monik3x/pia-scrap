@@ -435,6 +435,56 @@ def test_refresh_keeps_in_memory_token_when_persistence_fails(monkeypatch, caplo
     assert "refreshed in memory, but could not be stored" in caplog.text
 
 
+def test_login_persists_tokens(monkeypatch):
+    client = make_api_client()
+    client.email = "user@example.test"
+    client.password = "pw"
+    client.s = FakeSession([])
+    client.s.cookies = {"USERKEY": "new-user", "TKEY": "new-tkey"}
+    saves = []
+    monkeypatch.setattr(
+        api,
+        "request_with_retries",
+        lambda *args, **kwargs: FakeResponse(200, {"result": {"LOGINAT": "new-login"}}),
+    )
+    monkeypatch.setattr(api, "load_config", lambda: {"other": "keep"})
+    monkeypatch.setattr(api, "save_config", lambda config: saves.append(config) or True)
+
+    assert client.login() == "new-login"
+    assert client.tokens.login_at == "new-login"
+    assert client.tokens.userkey == "new-user"
+    assert client.tokens.tkey == "new-tkey"
+    assert saves == [{
+        "other": "keep",
+        "login_at": "new-login",
+        "userkey": "new-user",
+        "tkey": "new-tkey",
+    }]
+
+
+def test_login_keeps_in_memory_token_when_persistence_fails(monkeypatch, caplog):
+    client = make_api_client(login_at="old-token")
+    client.email = "user@example.test"
+    client.password = "pw"
+    client.s = FakeSession([])
+    client.s.cookies = {"USERKEY": "new-user", "TKEY": "new-tkey"}
+    monkeypatch.setattr(
+        api,
+        "request_with_retries",
+        lambda *args, **kwargs: FakeResponse(200, {"result": {"LOGINAT": "new-login"}}),
+    )
+    monkeypatch.setattr(api, "load_config", lambda: {})
+    monkeypatch.setattr(api, "save_config", lambda config: False)
+
+    with caplog.at_level("WARNING", logger="pia_scrap"):
+        assert client.login() == "new-login"
+
+    assert client.tokens.login_at == "new-login"
+    assert client.tokens.userkey == "new-user"
+    assert client.tokens.tkey == "new-tkey"
+    assert "refreshed in memory, but could not be stored" in caplog.text
+
+
 @pytest.mark.parametrize("method_name", ["login", "refresh"])
 @pytest.mark.parametrize(
     "body",

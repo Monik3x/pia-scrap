@@ -58,7 +58,7 @@ Escape remote and user-provided text before it enters generated HTML. Validate A
 
 ## Constraints
 
-API stays in `api.py`, queue in `engine.py`, parse in `novel.py`, output in `builder.py` / `epub.py`. Engine calls `build_epub` and `build_txt`. Those two own skip and chapter fetch. `main.py` has no business logic. Preserve the engine callback and cancellation interfaces. Shared options stay equivalent between CLI and GUI. Email and password are both provided or neither. Option changes update `README.md`. Library modules use `logging.getLogger("pia_scrap")`. Tk widgets update on the UI thread; network and file work stay on the worker.
+API stays in `api.py`, queue in `engine.py`, parse in `novel.py`, output in `builder.py` / `epub.py`. Engine calls `build_epub` and `build_txt`. Those two own skip and chapter fetch. `main.py` has no business logic. Preserve the engine callback and cancellation interfaces. Shared options stay equivalent between CLI and GUI. Email and password are both provided or neither. Option changes update `README.md`. Library modules use `logging.getLogger("pia_scrap")`. Tk widgets update on the UI thread; network and file work stay on the worker. A successful `login()` or `refresh()` writes `login_at`, `userkey`, and `tkey` to `.api.json`.
 
 ## Tests
 
