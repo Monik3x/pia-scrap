@@ -48,7 +48,9 @@ A local book is identified by novel ID. Write `.novel_id` before cache or EPUB w
 
 ## Images
 
-`IMAGE_HOST_COOKIE_POLICY` is the image allowlist. A new host needs a `signed` or `session` policy. Signed hosts get a case in `test_cdn_image_fetch_sends_only_signed_cloudfront_cookies`.
+`IMAGE_HOST_COOKIE_POLICY` is the image allowlist. A new host needs a `signed` or `session` policy. Signed hosts get a case in `test_cdn_image_fetch_sends_only_signed_cloudfront_cookies`. A 403 on a signed host refreshes CloudFront cookies and retries the GET. Cover that success path when changing `fetch_image`.
+
+Image GETs use a dedicated session that does not hold USERKEY/TKEY. Signed hosts receive only CloudFront cookies; session hosts receive only USERKEY/TKEY. Tests must fail if the request session's cookie jar would attach API auth cookies.
 
 Fetch and embed through `fetch_image`. Re-check redirect targets against the allowlist. Normalize remote URLs before fetch or embed. Detect image type from content.
 

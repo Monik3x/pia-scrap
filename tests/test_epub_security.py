@@ -15,9 +15,12 @@ class FakeResponse:
             raise RuntimeError(f"HTTP {self.status_code}")
 
 
+AUTH_COOKIES = {"USERKEY": "user", "TKEY": "token", "other": "secret"}
+
+
 class FakeSession:
-    def __init__(self, responses):
-        self.cookies = {"USERKEY": "user", "TKEY": "token", "other": "secret"}
+    def __init__(self, responses, cookies=None):
+        self.cookies = {} if cookies is None else cookies
         self.responses = list(responses)
         self.calls = []
 
@@ -26,13 +29,40 @@ class FakeSession:
         return self.responses.pop(0)
 
 
+def cookies_curl_would_send(session, headers):
+    """Merge the session jar with the Cookie header the way curl_cffi does."""
+    sent = {}
+    jar = getattr(session, "cookies", None) or {}
+    if hasattr(jar, "items"):
+        sent.update({str(key): str(value) for key, value in jar.items() if value})
+    cookie_header = (headers or {}).get("Cookie") or ""
+    for part in cookie_header.split(";"):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        sent[key.strip()] = value
+    return sent
+
+
 def make_client(session):
     client = object.__new__(NovelpiaClient)
-    client.s = session
+    client.s = FakeSession([], cookies=dict(AUTH_COOKIES))
+    client._image_s = session
     client.timeout = 30
     client.cancel_event = None
     client.sleep_cooperative = lambda seconds: None
     return client
+
+
+def test_image_session_jar_does_not_hold_api_auth_cookies():
+    client = NovelpiaClient(userkey="user", tkey="token")
+
+    assert client.s is not client._image_s
+    assert client.s.cookies.get("USERKEY") == "user"
+    assert client.s.cookies.get("TKEY") == "token"
+    assert not client._image_s.cookies.get("USERKEY")
+    assert not client._image_s.cookies.get("TKEY")
 
 
 def test_image_fetch_blocks_unapproved_hosts_without_request():
@@ -66,7 +96,8 @@ def test_image_fetch_uses_image_headers_not_json_session_headers():
 )
 def test_session_image_fetch_sends_only_session_cookies(host):
     session = FakeSession([FakeResponse()])
-    result = make_client(session).fetch_image(
+    client = make_client(session)
+    result = client.fetch_image(
         f"https://{host}/image.jpg",
         "https://global.novelpia.com/viewer/1",
         {
@@ -77,11 +108,13 @@ def test_session_image_fetch_sends_only_session_cookies(host):
     )
 
     assert result == b"image"
+    assert client.s.calls == []
     headers = session.calls[0][1]["headers"]
-    assert "USERKEY=user" in headers["Cookie"]
-    assert "TKEY=token" in headers["Cookie"]
-    assert "CloudFront-Policy" not in headers["Cookie"]
-    assert "other=secret" not in headers["Cookie"]
+    sent = cookies_curl_would_send(session, headers)
+    assert sent.get("USERKEY") == "user"
+    assert sent.get("TKEY") == "token"
+    assert "CloudFront-Policy" not in sent
+    assert "other" not in sent
     assert session.calls[0][1]["allow_redirects"] is False
 
 
@@ -91,7 +124,8 @@ def test_session_image_fetch_sends_only_session_cookies(host):
 )
 def test_cdn_image_fetch_sends_only_signed_cloudfront_cookies(host):
     session = FakeSession([FakeResponse()])
-    result = make_client(session).fetch_image(
+    client = make_client(session)
+    result = client.fetch_image(
         f"https://{host}/image.jpg",
         "https://global.novelpia.com/viewer/1",
         {
@@ -103,11 +137,13 @@ def test_cdn_image_fetch_sends_only_signed_cloudfront_cookies(host):
     )
 
     assert result == b"image"
+    assert client.s.calls == []
     headers = session.calls[0][1]["headers"]
-    assert "USERKEY" not in headers["Cookie"]
-    assert "TKEY" not in headers["Cookie"]
-    assert "unexpected" not in headers["Cookie"]
-    assert "CloudFront-Policy=policy" in headers["Cookie"]
+    sent = cookies_curl_would_send(session, headers)
+    assert "USERKEY" not in sent
+    assert "TKEY" not in sent
+    assert "unexpected" not in sent
+    assert sent.get("CloudFront-Policy") == "policy"
     assert session.calls[0][1]["allow_redirects"] is False
 
 

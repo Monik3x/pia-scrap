@@ -43,6 +43,7 @@ def make_api_client(*, session=None, cancel_event=None, login_at="login", real_s
     if not real_sleep:
         client.sleep_cooperative = lambda seconds: None
     client.s = object() if session is None else session
+    client._image_s = client.s
     client.timeout = 30
     client.throttle = 1.5
     client.tokens = api.Tokens(login_at=login_at)
@@ -1016,3 +1017,45 @@ def test_fetch_image_keeps_renewal_failure_when_signed_key_refresh_fails(caplog)
     assert "could not renew image authorization" in caplog.text
     assert "ticket failed" in caplog.text
     assert "HTTP Error or Timeout" not in caplog.text
+
+
+def test_fetch_image_retries_after_signed_host_403_with_fresh_cookies():
+    session = FakeSession([
+        FakeResponse(403),
+        FakeResponse(200, content=b"fresh-image"),
+    ])
+    client = make_api_client(session=session)
+    cookies = {
+        "CloudFront-Policy": "stale",
+        "CloudFront-Signature": "old-sig",
+        "CloudFront-Key-Pair-Id": "old-id",
+    }
+    signed_key_calls = []
+
+    def episode_signed_key(episode_no):
+        signed_key_calls.append(episode_no)
+        return {
+            "CloudFront-Policy": "fresh-policy",
+            "CloudFront-Signature": "fresh-sig",
+            "CloudFront-Key-Pair-Id": "fresh-id",
+        }
+
+    client.episode_signed_key = episode_signed_key
+
+    result = client.fetch_image(
+        "https://gn.novelpia.com/img.jpg",
+        "https://global.novelpia.com/viewer/1",
+        episode_cookies=cookies,
+        episode_no=99,
+    )
+
+    assert result == b"fresh-image"
+    assert signed_key_calls == [99]
+    assert len(session.calls) == 2
+    first_cookie = session.calls[0][1]["headers"]["Cookie"]
+    retry_cookie = session.calls[1][1]["headers"]["Cookie"]
+    assert "CloudFront-Policy=stale" in first_cookie
+    assert "CloudFront-Policy=fresh-policy" in retry_cookie
+    assert "USERKEY" not in retry_cookie
+    assert "TKEY" not in retry_cookie
+    assert cookies["CloudFront-Policy"] == "fresh-policy"

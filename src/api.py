@@ -57,8 +57,12 @@ class NovelpiaClient:
                  cancel_event: Optional[threading.Event] = None):
         self.s = requests.Session(impersonate="chrome110")
         self.s.headers.update(const.SESSION_HEADERS.copy())
+        # Image GETs must not use the API jar; curl_cffi sends jar cookies even with a Cookie header.
+        self._image_s = requests.Session(impersonate="chrome110")
         if proxy:
-            self.s.proxies.update({"http": proxy, "https": proxy})
+            proxies = {"http": proxy, "https": proxy}
+            self.s.proxies.update(proxies)
+            self._image_s.proxies.update(proxies)
         self.timeout = timeout
         self.tokens = Tokens()
         self.email = email
@@ -323,13 +327,17 @@ class NovelpiaClient:
                         if value:
                             cookie_dict[key] = value
 
-                # An explicit header prevents the session's broad .novelpia.com
-                # cookie jar from adding authentication cookies to CDN requests.
                 headers["Cookie"] = "; ".join(
                     f"{key}={value}" for key, value in cookie_dict.items()
                 )
 
-                resp = self.s.get(
+                # Drop leftover CDN Set-Cookie values so they cannot ride the next GET.
+                image_cookies = getattr(self._image_s, "cookies", None)
+                clear_image_cookies = getattr(image_cookies, "clear", None)
+                if callable(clear_image_cookies):
+                    clear_image_cookies()
+
+                resp = self._image_s.get(
                     url, headers=headers, timeout=self.timeout, allow_redirects=False
                 )
 
