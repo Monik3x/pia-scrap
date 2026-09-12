@@ -191,6 +191,43 @@ def test_novel_maps_server_error_to_unavailable_novel(monkeypatch):
         client.novel(123)
 
 
+def test_novel_omits_login_at_and_still_sends_session_cookies():
+    session = FakeSession([
+        FakeResponse(200, {"result": {"novel": {"novel_no": 1624}}}),
+    ])
+    client = _client_with_session(session)
+    client.tokens = api.Tokens(login_at="secret-login")
+
+    payload = client.novel(1624)
+
+    assert payload == {"result": {"novel": {"novel_no": 1624}}}
+    assert len(session.calls) == 1
+    method, url, kwargs = session.calls[0]
+    assert method == "GET"
+    assert url.endswith("/v1/novel")
+    assert kwargs["params"] == {"novel_no": 1624}
+    assert "login-at" not in kwargs["headers"]
+    assert "USERKEY=u" in kwargs["headers"]["Cookie"]
+
+
+def test_novel_auth_recovery_does_not_inject_login_at():
+    session = FakeSession([
+        FakeResponse(401),
+        FakeResponse(200, {"result": {"novel": {"novel_no": 1}}}),
+    ])
+    client = _client_with_session(session)
+    client.tokens = api.Tokens(login_at="secret-login")
+    client.refresh = lambda: "fresh-login-at"
+
+    payload = client.novel(1)
+
+    assert payload == {"result": {"novel": {"novel_no": 1}}}
+    assert len(session.calls) == 2
+    assert "login-at" not in session.calls[0][2]["headers"]
+    assert "login-at" not in session.calls[1][2]["headers"]
+    assert "USERKEY=u" in session.calls[1][2]["headers"]["Cookie"]
+
+
 def test_api_request_injects_shared_auth_kwargs():
     session = FakeSession([
         FakeResponse(401),
@@ -362,6 +399,23 @@ def test_request_recovers_expired_auth():
 
     assert response.status_code == 200
     assert session.calls[1][2]["headers"]["login-at"] == "fresh-login-at"
+
+
+def test_auth_recovery_preserves_headers_that_omitted_login_at():
+    session = FakeSession([
+        FakeResponse(401),
+        FakeResponse(200),
+    ])
+
+    response = api.request_with_retries(
+        session, "GET", "https://example.test/v1/novel",
+        headers={}, allow_refresh=True,
+        refresh_fn=lambda: "fresh-login-at",
+    )
+
+    assert response.status_code == 200
+    assert "login-at" not in session.calls[0][2]["headers"]
+    assert "login-at" not in session.calls[1][2]["headers"]
 
 
 def test_refresh_keeps_in_memory_token_when_persistence_fails(monkeypatch, caplog):

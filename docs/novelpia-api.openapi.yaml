@@ -108,7 +108,14 @@ paths:
       tags: [Novels]
       operationId: getNovel
       summary: Get novel metadata
+      description: |
+        `result.info` is the catalog chapter mix when `Login-At` is omitted.
+        A plus session that sends `Login-At` may set `free_epi_cnt=epi_cnt` and
+        zero `ad_epi_cnt`/`premium_epi_cnt`. pia-scrap omits `Login-At` here.
       security:
+        - userKey: []
+          tKey: []
+          lastLogin: []
         - loginAt: []
           userKey: []
           tKey: []
@@ -473,7 +480,9 @@ components:
       additionalProperties: true
     NovelEpisodeCounts:
       type: object
-      description: Informational counts. Ticket 500s are the access check.
+      description: |
+        Catalog chapter mix without `Login-At`. Ticket 500s are the access check.
+        Plus sessions that send `Login-At` may report every chapter as free.
       properties:
         epi_cnt: {type: integer, minimum: 0}
         free_epi_cnt: {type: integer, minimum: 0}

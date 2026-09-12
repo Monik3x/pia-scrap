@@ -14,6 +14,7 @@ Cancel by calling `sleep_cooperative` and letting `DownloadCancelled` propagate.
 
 Chapter failures stay error dicts. Cancel raises.
 Ad-gated (ticket 0008) and premium (ticket 0009) denials are chapter error dicts, not NovelSkipError. A content 403 remints `_t` via episode_ticket; do not refresh login_at for that status.
+`/v1/novel` omits `login-at` so plus sessions keep real free/ad/premium counts. Auth recovery refreshes cookies but adds `login-at` only when the original request sent that header.
 
 Expected novel skips raise `NovelSkipError` or a subclass. Other exceptions are hard failures with a traceback.
 

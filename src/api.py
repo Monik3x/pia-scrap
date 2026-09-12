@@ -170,6 +170,8 @@ class NovelpiaClient:
         r = self._api_request(
             "GET",
             url,
+            # Login-At makes plus sessions report every chapter as free in info.
+            headers={},
             params={"novel_no": novel_id},
             max_retries=1,  # Empty/invalid IDs return 500; skip extra backoff
         )
@@ -799,7 +801,8 @@ def request_with_retries(session: requests.Session, method: str, url: str, *,
                             did_refresh = True
                         else:
                             did_login = True
-                        if new_login_at:
+                        if new_login_at and (headers is None or "login-at" in headers):
+                            # /v1/novel omits login-at; keep that header off the retry.
                             headers = merge_login_at(headers, new_login_at)
                         response = send_request()
                         if not _response_requires_auth(response):
