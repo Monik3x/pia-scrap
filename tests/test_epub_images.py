@@ -1,4 +1,3 @@
-import hashlib
 import json
 import zipfile
 
@@ -157,7 +156,6 @@ def test_non_update_build_does_not_write_image_index(
 
     book_dir = tmp_path / "a-test-novel"
     assert not (book_dir / ".raw_cache" / "image_index.json").exists()
-    assert not (book_dir / ".raw_cache" / "images").exists()
 
 
 def test_update_stores_index_and_reuses_epub_images_without_refetch(
@@ -175,7 +173,6 @@ def test_update_stores_index_and_reuses_epub_images_without_refetch(
     book_dir = tmp_path / "a-test-novel"
     index_path = book_dir / ".raw_cache" / "image_index.json"
     assert index_path.exists()
-    assert not (book_dir / ".raw_cache" / "images").exists()
     index = json.loads(index_path.read_text(encoding="utf-8"))
     assert index["images"][IMAGE_A]["sha256"] == image_digest(PNG_A)
     assert index["images"][IMAGE_A]["file"] == f"images/{image_digest(PNG_A)}.png"
@@ -184,36 +181,6 @@ def test_update_stores_index_and_reuses_epub_images_without_refetch(
     _build(tmp_path, novel_data, chapters, fetch_image, update_mode=True)
     assert fetches == []
     assert _image_members(output)[0].endswith(f"/images/{image_digest(PNG_A)}.png")
-
-
-def test_update_migrates_legacy_url_cache_then_deletes_it(
-    tmp_path, novel_data, episodes
-):
-    fetches, fetch_image = _stub_images({IMAGE_A: PNG_B})
-    book_dir = tmp_path / "a-test-novel"
-    cache_dir = book_dir / ".raw_cache"
-    image_dir = cache_dir / "images"
-    image_dir.mkdir(parents=True)
-    (book_dir / ".novel_id").write_text("42", encoding="utf-8")
-    legacy_name = hashlib.sha256(IMAGE_A.encode("utf-8")).hexdigest() + ".bin"
-    (image_dir / legacy_name).write_bytes(PNG_A)
-
-    output, _, _ = _build(
-        tmp_path,
-        novel_data,
-        _chapters({101: f'<p><img src="{IMAGE_A}"/></p>'}, episodes[:1]),
-        fetch_image,
-        update_mode=True,
-    )
-
-    assert fetches == []
-    assert not image_dir.exists()
-    index = json.loads((cache_dir / "image_index.json").read_text(encoding="utf-8"))
-    assert index["images"][IMAGE_A]["sha256"] == image_digest(PNG_A)
-    members = _image_members(output)
-    assert len(members) == 1
-    with zipfile.ZipFile(output) as archive:
-        assert archive.read(members[0]) == PNG_A
 
 
 def test_missing_or_non_numeric_epi_no_does_not_ticket_chapter_index(
@@ -256,20 +223,11 @@ def test_missing_or_non_numeric_epi_no_does_not_ticket_chapter_index(
     ]
 
 
-def test_successful_rebuild_deletes_legacy_images_even_if_some_imgs_dropped(
+def test_dropped_images_are_omitted_from_image_index(
     tmp_path, novel_data, episodes
 ):
     image_c = "https://image.novelpia.com/c.png"
     fetches, fetch_image = _stub_images({IMAGE_A: PNG_A, image_c: None})
-    book_dir = tmp_path / "a-test-novel"
-    cache_dir = book_dir / ".raw_cache"
-    image_dir = cache_dir / "images"
-    image_dir.mkdir(parents=True)
-    (book_dir / ".novel_id").write_text("42", encoding="utf-8")
-    a_name = hashlib.sha256(IMAGE_A.encode("utf-8")).hexdigest() + ".bin"
-    c_name = hashlib.sha256(image_c.encode("utf-8")).hexdigest() + ".bin"
-    (image_dir / a_name).write_bytes(PNG_A)
-    (image_dir / c_name).write_bytes(b"")
 
     _build(
         tmp_path,
@@ -279,8 +237,11 @@ def test_successful_rebuild_deletes_legacy_images_even_if_some_imgs_dropped(
         update_mode=True,
     )
 
-    assert fetches == [image_c]
-    assert not image_dir.exists()
-    index = json.loads((cache_dir / "image_index.json").read_text(encoding="utf-8"))
+    assert fetches == [IMAGE_A, image_c]
+    index = json.loads(
+        (tmp_path / "a-test-novel" / ".raw_cache" / "image_index.json").read_text(
+            encoding="utf-8"
+        )
+    )
     assert IMAGE_A in index["images"]
     assert image_c not in index["images"]

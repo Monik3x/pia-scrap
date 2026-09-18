@@ -55,6 +55,8 @@ Image GETs use a dedicated session that does not hold USERKEY/TKEY. Signed hosts
 
 Fetch and embed through `fetch_image`. Re-check redirect targets against the allowlist. Normalize remote URLs before fetch or embed. Detect image type from content.
 
+Image reuse is `.raw_cache/image_index.json` plus bytes in the EPUB.
+
 ## Untrusted input
 
 Escape remote and user-provided text before it enters generated HTML. Validate API payload shape before nested indexing. A bad row in a list endpoint is skipped. A bad auth body raises. `my_library` returns liked IDs of any locale. `recent_novels` is Korean K-Premium only.

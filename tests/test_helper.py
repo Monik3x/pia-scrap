@@ -164,7 +164,6 @@ def test_book_output_paths_returns_one_consistent_layout(tmp_path):
     assert paths.metadata_path == str(tmp_path / "a-test-novel" / "metadata.json")
     assert paths.chapters_path == str(tmp_path / "a-test-novel" / "chapters.jsonl")
     assert paths.novel_id_path == str(tmp_path / "a-test-novel" / ".novel_id")
-    assert paths.image_cache_dir == str(tmp_path / "a-test-novel" / ".raw_cache" / "images")
     assert paths.image_index_path == str(
         tmp_path / "a-test-novel" / ".raw_cache" / "image_index.json"
     )

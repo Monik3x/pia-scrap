@@ -274,36 +274,6 @@ def test_build_epub_update_refetches_full_list_instead_of_shrinking_on_revision_
     assert result == (str(book_dir / "book.epub"), "Book", 2)
 
 
-def test_build_epub_update_skips_even_with_legacy_image_cache(
-    monkeypatch, tmp_path, novel_data, episodes
-):
-    monkeypatch.setattr(
-        builder,
-        "fetch_novel_and_episodes",
-        lambda *args, **kwargs: (novel_data, episodes, _metadata(novel_data, title="Book")),
-    )
-    book_dir = tmp_path / "book"
-    book_dir.mkdir()
-    (book_dir / ".raw_cache" / "images").mkdir(parents=True)
-    builder.build_metadata(str(book_dir), novel_data, 42, episodes)
-    with zipfile.ZipFile(book_dir / "book.epub", "w") as archive:
-        archive.writestr("chap_0001.xhtml", "one")
-        archive.writestr("chap_0002.xhtml", "two")
-
-    monkeypatch.setattr(
-        builder,
-        "EpubBuilder",
-        recording_epub_builder(
-            book_dir,
-            fail="current books should skip even with leftover image cache",
-        ),
-    )
-
-    result = builder.build_epub(object(), 42, str(tmp_path), update_mode=True)
-
-    assert result == (None, "Book", 2)
-
-
 @pytest.mark.parametrize("stored_revision", [None, 3])
 def test_build_epub_rebuilds_when_chapter_revisions_do_not_match(
     monkeypatch, tmp_path, novel_data, episodes, stored_revision
@@ -604,7 +574,7 @@ def test_load_or_fetch_reuses_only_raw_cache_with_matching_episode_revision(
     assert second_cache["flag_detail_trans"] == 4
 
 
-def test_failed_chapter_fetch_leaves_legacy_image_cache(
+def test_failed_chapter_fetch_does_not_write_image_index(
     monkeypatch, tmp_path, novel_data, episodes
 ):
     monkeypatch.setattr(
@@ -612,11 +582,6 @@ def test_failed_chapter_fetch_leaves_legacy_image_cache(
         "fetch_novel_and_episodes",
         lambda *args, **kwargs: (novel_data, episodes[:1], _metadata(novel_data)),
     )
-    book_dir = tmp_path / "a-test-novel"
-    image_dir = book_dir / ".raw_cache" / "images"
-    image_dir.mkdir(parents=True)
-    leftover = image_dir / "keep.bin"
-    leftover.write_bytes(b"keep")
 
     with pytest.raises(RuntimeError, match="The existing EPUB was left unchanged"):
         builder.build_epub(
@@ -626,8 +591,9 @@ def test_failed_chapter_fetch_leaves_legacy_image_cache(
             update_mode=True,
         )
 
-    assert leftover.exists()
-    assert not (book_dir / ".raw_cache" / "image_index.json").exists()
+    assert not (
+        tmp_path / "a-test-novel" / ".raw_cache" / "image_index.json"
+    ).exists()
 
 
 def test_failed_rebuild_leaves_epub_replaceable(

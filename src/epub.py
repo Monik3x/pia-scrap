@@ -3,7 +3,6 @@ import hashlib
 import os
 import json
 import logging
-import shutil
 import zipfile
 
 from typing import Callable, Dict, List, Optional, Tuple
@@ -109,40 +108,8 @@ def _zip_member_bytes(
     return None
 
 
-def _legacy_image_cache_path(image_cache_dir: str, url: str) -> str:
-    return os.path.join(
-        image_cache_dir,
-        hashlib.sha256(url.encode("utf-8")).hexdigest() + ".bin",
-    )
-
-
-def _read_legacy_image_cache(image_cache_dir: str, url: str) -> Optional[bytes]:
-    cache_path = _legacy_image_cache_path(image_cache_dir, url)
-    try:
-        with open(cache_path, "rb") as image_file:
-            cached_bytes = image_file.read()
-        if cached_bytes:
-            return cached_bytes
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        logger.warning(f"Could not read cached image {cache_path}: {exc}")
-    return None
-
-
-def _remove_legacy_image_cache(image_cache_dir: str) -> None:
-    if not os.path.isdir(image_cache_dir):
-        return
-    try:
-        shutil.rmtree(image_cache_dir)
-    except OSError as exc:
-        logger.warning(
-            f"Could not remove leftover image cache {image_cache_dir}: {exc}"
-        )
-
-
 class _EpubImageStore:
-    """Resolve image bytes from the previous EPUB, leftover URL cache, or a download."""
+    """Resolve image bytes from the previous EPUB or a download."""
 
     def __init__(
         self,
@@ -192,14 +159,6 @@ class _EpubImageStore:
         digest = self.url_to_digest.get(url)
         if digest and digest in self.digest_bytes:
             return self.digest_bytes[digest]
-
-        if self.update_mode:
-            legacy = _read_legacy_image_cache(self.paths.image_cache_dir, url)
-            if legacy:
-                digest = image_digest(legacy)
-                self.url_to_digest[url] = digest
-                self.digest_bytes.setdefault(digest, legacy)
-                return self.digest_bytes[digest]
 
         image_bytes = fetch()
         if not image_bytes:
@@ -251,7 +210,6 @@ class _EpubImageStore:
                 logger.warning(
                     f"Could not write image index {self.paths.image_index_path}: {exc}"
                 )
-        _remove_legacy_image_cache(self.paths.image_cache_dir)
 
 
 class EpubBuilder:
@@ -387,6 +345,7 @@ class EpubBuilder:
         toc: List = []
 
         for i, res in enumerate(chapters, 1):
+            # Chapter HTML is sanitized at fetch-complete; this step only rewrites images.
             html_text = res["html"]
             epi_title = res["epi_title"]
             signed_key = res.get("signed_key", {})
@@ -462,6 +421,7 @@ class EpubBuilder:
         out_path = paths.epub_path
         temp_path = out_path + ".tmp"
         try:
+            # Write to a sibling .tmp and replace so a failed build keeps the previous EPUB.
             epub.write_epub(temp_path, book, {})
             os.replace(temp_path, out_path)
         finally:

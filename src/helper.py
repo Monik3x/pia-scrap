@@ -33,7 +33,6 @@ class BookOutputPaths:
     chapters_path: str
     novel_id_path: str
     cache_dir: str
-    image_cache_dir: str
     image_index_path: str
 
 
@@ -386,7 +385,6 @@ def book_output_paths(
         chapters_path=os.path.join(book_dir, "chapters.jsonl"),
         novel_id_path=os.path.join(book_dir, ".novel_id"),
         cache_dir=cache_dir,
-        image_cache_dir=os.path.join(cache_dir, "images"),
         image_index_path=os.path.join(cache_dir, "image_index.json"),
     )
 
