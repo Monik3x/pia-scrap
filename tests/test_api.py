@@ -282,6 +282,29 @@ def test_episode_list_maps_missing_episodes_to_no_episodes_error(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("requested_rows", "sent_rows"),
+    [(1, 2), (2, 2), (20, 20)],
+)
+def test_episode_list_sends_at_least_two_rows(monkeypatch, requested_rows, sent_rows):
+    payload = {"result": {"list": [{"episode_no": 600376}]}}
+    calls = []
+
+    def fake_request(*args, **kwargs):
+        calls.append(kwargs)
+        return FakeResponse(200, payload)
+
+    monkeypatch.setattr(api, "request_with_retries", fake_request)
+    client = make_api_client()
+
+    assert client.episode_list(3894, rows=requested_rows) == payload
+    assert calls[0]["params"] == {
+        "novel_no": 3894,
+        "rows": sent_rows,
+        "sort": "ASC",
+    }
+
+
+@pytest.mark.parametrize(
     ("retry_after", "expected_wait"),
     [
         ("7", 7.0),

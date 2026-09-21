@@ -168,6 +168,44 @@ def test_fetch_novel_and_episodes_accepts_captured_prologue_shape(captured_api_s
     ]
 
 
+def test_fetch_novel_and_episodes_keeps_single_chapter_novels():
+    novel_response = {
+        "result": {
+            "novel": {
+                "novel_no": 3894,
+                "novel_name": "Level Up – To Break All Limits I Have",
+                "count_epi": 1,
+            },
+            "info": {
+                "epi_cnt": 1,
+                "free_epi_cnt": 1,
+                "ad_epi_cnt": 0,
+                "premium_epi_cnt": 0,
+            },
+            "writer_list": [{"writer_name": "MakBow"}],
+        }
+    }
+    episode = {
+        "episode_no": 600376,
+        "novel_no": 3894,
+        "epi_num": 1,
+        "epi_title": "Chapter 01: To Level Up",
+        "flag_open": 1,
+    }
+    requested_rows = []
+    client = SimpleNamespace(
+        novel=lambda novel_id: novel_response,
+        episode_list=lambda novel_id, rows: requested_rows.append(rows)
+        or {"result": {"list": [episode]}},
+    )
+
+    _, episodes, metadata = fetch_novel_and_episodes(client, 3894)
+
+    assert metadata.episode_count == 1
+    assert requested_rows == [1]
+    assert episodes == [episode]
+
+
 @pytest.mark.parametrize("payload", [None, {}, {"result": {}}, {"result": {"novel": []}}])
 def test_parse_novel_metadata_rejects_invalid_payload(payload):
     with pytest.raises(NoMetadataError, match="no metadata"):

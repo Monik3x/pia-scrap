@@ -223,8 +223,11 @@ paths:
         - name: rows
           in: query
           required: true
-          description: Maximum requested rows. pia-scrap normally sends the metadata episode count.
-          schema: {type: integer, minimum: 1}
+          description: |
+            Maximum requested rows. The service rejects `rows` < 2 with HTTP 500
+            `COMMON_ERROR` `0001` (`rows must not be less than 2`). pia-scrap
+            sends `max(2, metadata episode count)` so one-chapter novels still list.
+          schema: {type: integer, minimum: 2}
         - name: sort
           in: query
           required: false

@@ -196,10 +196,11 @@ class NovelpiaClient:
 
     def episode_list(self, novel_id: int, rows: int) -> Dict:
         url = f"{const.API_BASE}/v1/novel/episode/list"
+        # The list endpoint 500s with COMMON_ERROR 0001 when rows < 2.
         r = self._api_request(
             "GET",
             url,
-            params={"novel_no": novel_id, "rows": rows, "sort": "ASC"},
+            params={"novel_no": novel_id, "rows": max(2, int(rows)), "sort": "ASC"},
             max_retries=1,
         )
         if _response_indicates_missing_episodes(r):
@@ -415,6 +416,8 @@ class NovelpiaClient:
 
     def fetch_episode(self, ep: Dict, idx: int = 0) -> Dict:
         """Return a result dict with chapter HTML or an error; cancel raises DownloadCancelled."""
+        # Stagger parallel workers and give cancel a checkpoint before ticket work.
+        # Ticket and content already sleep the configured throttle.
         self.sleep_cooperative(random.uniform(0.1, 0.6))
 
         episode_no = ep.get("episode_no")
@@ -565,7 +568,7 @@ class NovelpiaClient:
                         store_finished_results()
                         raise
                     store_result(idx, res)
-                    # Keep a finished chapter so on_complete_cb can write the update cache.
+                    # Honor cancel only after storing this finished chapter so the update cache can be written.
                     if self.cancel_event and self.cancel_event.is_set():
                         raise DownloadCancelled("Download pool stopped by cancellation request.")
             except (KeyboardInterrupt, DownloadCancelled) as e:
@@ -786,6 +789,7 @@ def request_with_retries(session: requests.Session, method: str, url: str, *,
 
     def send_request():
         request_headers = headers
+        # Login sets USERKEY/TKEY in the response; skip attaching the stored jar.
         if "/v1/member/login" not in url:
             request_headers = attach_auth_cookies(session, request_headers)
         return session.request(
