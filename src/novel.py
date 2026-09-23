@@ -82,6 +82,17 @@ def user_subscription_status(me_response: Any) -> str:
     return "unknown"
 
 
+def format_account_status(me_response: Any) -> str:
+    status = user_subscription_status(me_response)
+    result = me_response.get("result") if isinstance(me_response, dict) else None
+    login = result.get("login") if isinstance(result, dict) else None
+    raw_nick = login.get("mem_nick") if isinstance(login, dict) else None
+    nick = raw_nick.strip() if isinstance(raw_nick, str) else ""
+    if nick:
+        return f"account={status} nick='{nick}'"
+    return f"account={status}"
+
+
 def _info_count(info: Any, key: str) -> int:
     raw = info.get(key) if isinstance(info, dict) else None
     try:
@@ -238,27 +249,6 @@ def fetch_novel_and_episodes(
         f"free={metadata.free_episode_count} ad={metadata.ad_episode_count} "
         f"premium={metadata.premium_episode_count}"
     )
-
-    try:
-        me_payload = client.me()
-    except Exception:
-        logger.warning("could not read account status")
-        status = "unknown"
-        nick = None
-    else:
-        status = user_subscription_status(me_payload)
-        login = (
-            (me_payload.get("result") or {}).get("login")
-            if isinstance(me_payload, dict)
-            else None
-        )
-        raw_nick = login.get("mem_nick") if isinstance(login, dict) else None
-        nick = raw_nick.strip() if isinstance(raw_nick, str) and raw_nick.strip() else None
-
-    if nick:
-        logger.info(f"account={status} nick='{nick}'")
-    else:
-        logger.info(f"account={status}")
 
     if metadata.episode_count == 0:
         raise NoEpisodesError(f"Novel {novel_id} has no downloadable episodes.")

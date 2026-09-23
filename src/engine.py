@@ -13,7 +13,7 @@ from src.helper import (
     save_config,
     write_text_atomic,
 )
-from src.novel import NovelSkipError
+from src.novel import NovelSkipError, format_account_status
 
 logger = logging.getLogger("pia_scrap")
 
@@ -247,6 +247,7 @@ class ScraperEngine:
                 self.update_status("Login successful. Stored tokens updated.")
             else:
                 self.update_status("Login successful, but tokens could not be stored.")
+            self._log_account_status()
             return True
         elif cfg_login_at and cfg_userkey:
             self.update_status("Validating stored authentication tokens...")
@@ -257,17 +258,27 @@ class ScraperEngine:
             )
             self.client.tokens.login_at = cfg_login_at
             try:
-                self.client.me()
+                me_payload = self.client.me()
             except Exception as e:
                 raise RuntimeError(
                     "Stored authentication could not be validated. "
                     "Enter your email and password to log in again."
                 ) from e
             self.update_status("Stored authentication is valid.")
+            self._log_account_status(me_payload)
             return True
         else:
             self.update_status("No credentials or stored tokens found.")
             return False
+
+    def _log_account_status(self, me_payload: Optional[Any] = None) -> None:
+        # Session-level; fetch_novel_and_episodes must not call /v1/login/me.
+        try:
+            payload = me_payload if me_payload is not None else self.client.me()
+        except Exception:
+            logger.warning("could not read account status")
+            return
+        logger.info(format_account_status(payload))
 
     def resolve_novel_ids(self, novel_ids_input: str) -> List[int]:
         if not self.client:

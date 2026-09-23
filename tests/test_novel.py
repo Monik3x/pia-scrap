@@ -7,6 +7,7 @@ from src.novel import (
     NoEpisodesError,
     NoMetadataError,
     fetch_novel_and_episodes,
+    format_account_status,
     html_from_episode_text,
     parse_novel_metadata,
     user_subscription_status,
@@ -327,7 +328,32 @@ def test_user_subscription_status_paid_free_unknown():
     assert user_subscription_status({"result": {}}) == "unknown"
 
 
-def test_fetch_novel_and_episodes_logs_account_and_counts(novel_data, caplog):
+def test_format_account_status_includes_nick_when_present():
+    assert format_account_status({
+        "result": {"login": {"mem_nick": "tester", "mem_plus_type": 0}},
+    }) == "account=free nick='tester'"
+    assert format_account_status({
+        "result": {"login": {"mem_nick": "  ", "mem_plus_type": 1}},
+    }) == "account=paid"
+    assert format_account_status(None) == "account=unknown"
+
+
+def test_fetch_novel_and_episodes_does_not_call_me(novel_data):
+    me_calls = []
+    client = SimpleNamespace(
+        me=lambda: me_calls.append(True) or {},
+        novel=lambda novel_id: novel_data,
+        episode_list=lambda novel_id, rows: {
+            "result": {"list": [{"episode_no": 1, "epi_title": "One"}]}
+        },
+    )
+
+    fetch_novel_and_episodes(client, 42)
+
+    assert me_calls == []
+
+
+def test_fetch_novel_and_episodes_logs_counts(novel_data, caplog):
     novel_payload = {
         "result": {
             "novel": novel_data["result"]["novel"],
@@ -354,9 +380,6 @@ def test_fetch_novel_and_episodes_logs_account_and_counts(novel_data, caplog):
         }
     }
     client = SimpleNamespace(
-        me=lambda: {
-            "result": {"login": {"mem_nick": "tester", "mem_plus_type": 0}},
-        },
         novel=lambda novel_id: novel_payload,
         episode_list=lambda novel_id, rows: episode_payload,
     )
@@ -364,5 +387,5 @@ def test_fetch_novel_and_episodes_logs_account_and_counts(novel_data, caplog):
     with caplog.at_level(logging.INFO, logger="pia_scrap"):
         fetch_novel_and_episodes(client, 42)
 
-    assert "account=free nick='tester'" in caplog.text
+    assert "account=" not in caplog.text
     assert "free=1 ad=4 premium=10" in caplog.text

@@ -80,6 +80,9 @@ def test_initialize_client_logs_in_and_saves_tokens(monkeypatch):
         def login(self):
             self.tokens.login_at = "new-login"
 
+        def me(self):
+            return {"result": {"login": {"mem_plus_type": 0}}}
+
     monkeypatch.setattr(engine, "load_config", lambda: {})
     def save(tokens):
         saved.append(tokens)
@@ -102,6 +105,9 @@ def test_initialize_client_reports_token_persistence_failure(monkeypatch):
         def login(self):
             self.tokens.login_at = "new-login"
 
+        def me(self):
+            return {"result": {"login": {"mem_plus_type": 0}}}
+
     statuses = []
     monkeypatch.setattr(engine, "load_config", lambda: {})
     monkeypatch.setattr(engine, "save_config", lambda config: False)
@@ -120,6 +126,84 @@ def test_initialize_client_returns_false_without_auth(monkeypatch):
     monkeypatch.delenv("NOVELPIA_EMAIL", raising=False)
     monkeypatch.delenv("NOVELPIA_PASSWORD", raising=False)
     assert not engine.ScraperEngine().initialize_client()
+
+
+def test_initialize_client_logs_account_status_from_stored_me(monkeypatch, caplog):
+    class Client:
+        def __init__(self, **kwargs):
+            self.tokens = SimpleNamespace(login_at=None)
+            self.me_calls = 0
+
+        def me(self):
+            self.me_calls += 1
+            return {"result": {"login": {"mem_nick": "tester", "mem_plus_type": 0}}}
+
+    monkeypatch.setattr(engine, "load_config", lambda: {
+        "login_at": "login", "userkey": "user", "tkey": "t",
+    })
+    monkeypatch.setattr(engine, "NovelpiaClient", Client)
+    scraper = engine.ScraperEngine()
+
+    with caplog.at_level(logging.INFO, logger="pia_scrap"):
+        assert scraper.initialize_client()
+
+    assert scraper.client.me_calls == 1
+    assert "account=free nick='tester'" in caplog.text
+
+
+def test_initialize_client_logs_account_status_after_login(monkeypatch, caplog):
+    class Cookies(dict):
+        pass
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.tokens = SimpleNamespace(login_at=None, tkey="token-fallback")
+            self.s = SimpleNamespace(cookies=Cookies(USERKEY="new-user", TKEY="new-token"))
+            self.me_calls = 0
+
+        def login(self):
+            self.tokens.login_at = "new-login"
+
+        def me(self):
+            self.me_calls += 1
+            return {"result": {"login": {"mem_nick": "tester", "mem_plus_type": 1}}}
+
+    monkeypatch.setattr(engine, "load_config", lambda: {})
+    monkeypatch.setattr(engine, "save_config", lambda config: True)
+    monkeypatch.setattr(engine, "NovelpiaClient", Client)
+    scraper = engine.ScraperEngine(email="me@test", password="secret")
+
+    with caplog.at_level(logging.INFO, logger="pia_scrap"):
+        assert scraper.initialize_client()
+
+    assert scraper.client.me_calls == 1
+    assert "account=paid nick='tester'" in caplog.text
+
+
+def test_initialize_client_login_continues_when_account_status_fails(monkeypatch, caplog):
+    class Cookies(dict):
+        pass
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.tokens = SimpleNamespace(login_at=None, tkey="token")
+            self.s = SimpleNamespace(cookies=Cookies(USERKEY="user", TKEY="token"))
+
+        def login(self):
+            self.tokens.login_at = "new-login"
+
+        def me(self):
+            raise RuntimeError("me down")
+
+    monkeypatch.setattr(engine, "load_config", lambda: {})
+    monkeypatch.setattr(engine, "save_config", lambda config: True)
+    monkeypatch.setattr(engine, "NovelpiaClient", Client)
+    scraper = engine.ScraperEngine(email="me@test", password="secret")
+
+    with caplog.at_level(logging.WARNING, logger="pia_scrap"):
+        assert scraper.initialize_client()
+
+    assert "could not read account status" in caplog.text
 
 
 def test_resolve_ids_delegates_named_lists_or_parses_range():
