@@ -9,7 +9,7 @@ from src import const
 def main():
     load_dotenv()
     ap = argparse.ArgumentParser(description="Novelpia to EPUB packer (API)")
-    ap.add_argument("novel_ids", help=("Novel ID (e.g. 1072) or Range (e.g. 1000-1050) or mixed strings (47,49,51-55), 'library' for favorites, or 'recent' for K-Premium novels among the 30 latest listings"),)
+    ap.add_argument("novel_ids", help=("Novel ID (e.g. 1072) or Range (e.g. 1000-1050) or mixed strings (47,49,51-55), 'library' for favorites, 'recent' for K-Premium novels among the 30 latest listings, or 'local' to update every book already in --out"),)
     ap.add_argument("--user", "--email", "-u", "-e", dest="email", help="Novelpia email (overrides config tokens if provided)")
     ap.add_argument("--pass", "--password", "-p", dest="password", help="Novelpia password (overrides config tokens if provided)")
     ap.add_argument("--out", default="output", help="Output directory")

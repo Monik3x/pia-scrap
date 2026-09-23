@@ -132,6 +132,37 @@ def test_resolve_ids_delegates_named_lists_or_parses_range():
     assert scraper.resolve_novel_ids("recent") == [20, 21]
     assert scraper.resolve_novel_ids("LATEST") == [20, 21]
     assert scraper.resolve_novel_ids("1,3-4") == [1, 3, 4]
+    assert scraper.update_mode is False
+
+
+def test_resolve_ids_local_scans_output_and_enables_update(tmp_path):
+    first = tmp_path / "alpha"
+    first.mkdir()
+    (first / ".novel_id").write_text("42", encoding="ascii")
+    second = tmp_path / "beta"
+    second.mkdir()
+    (second / "metadata.json").write_text('{"novel_id": 7}', encoding="utf-8")
+    hidden = tmp_path / ".hidden"
+    hidden.mkdir()
+    (hidden / ".novel_id").write_text("99", encoding="ascii")
+
+    statuses = []
+    scraper = engine.ScraperEngine(
+        out_dir=str(tmp_path),
+        update_mode=False,
+        status_callback=statuses.append,
+    )
+    scraper.client = SimpleNamespace()
+
+    assert scraper.resolve_novel_ids("LOCAL") == [42, 7]
+    assert scraper.update_mode is True
+    assert statuses == ["Scanning local library folders..."]
+
+
+def test_resolve_ids_local_returns_empty_when_output_has_no_books(tmp_path):
+    scraper = engine.ScraperEngine(out_dir=str(tmp_path / "missing"))
+    scraper.client = SimpleNamespace()
+    assert scraper.resolve_novel_ids("local") == []
 
 
 def test_download_queue_aggregates_success_skip_and_failure(monkeypatch, tmp_path):

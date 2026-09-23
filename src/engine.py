@@ -8,6 +8,7 @@ from src.builder import build_epub, build_txt
 from src.helper import (
     build_book_directory_index,
     load_config,
+    local_library_novel_ids,
     parse_range,
     save_config,
     write_text_atomic,
@@ -278,6 +279,11 @@ class ScraperEngine:
         elif novel_ids_input.lower() in ("recent", "latest"):
             self.update_status("Fetching the 30 most recent public K-Premium listings...")
             return self.client.recent_novels(rows=30)
+        elif novel_ids_input.lower() == "local":
+            # Same action as GUI Check & Update All.
+            self.update_status("Scanning local library folders...")
+            self.update_mode = True
+            return local_library_novel_ids(self.out_dir)
         else:
             return parse_range(novel_ids_input)
 

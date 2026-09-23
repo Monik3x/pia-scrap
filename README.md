@@ -42,7 +42,7 @@ python main.py NOVEL_ID [--user EMAIL] [--pass PASSWORD]
 
 | Argument | Description |
 |---|---|
-| `NOVEL_ID` | Mixed numeric/range `novel_no` (for example `49` or `40,47-50`), `mybook`/`library` for user favorites, or `recent`/`latest` for K-Premium novels among the 30 latest public listings |
+| `NOVEL_ID` | Mixed numeric/range `novel_no` (for example `49` or `40,47-50`), `mybook`/`library` for user favorites, `recent`/`latest` for K-Premium novels among the 30 latest public listings, or `local` to update every book already in `--out` (same as GUI Check & Update All; implies `--update`) |
 | `--user`, `--pass` | Login credentials; tokens saved to `.api.json` for reuse |
 | `--out` | Output directory (default: `output`) |
 | `--max-chapters` | Fetch up to N episodes (`0` or unset = all) |
@@ -86,6 +86,12 @@ python main.py library --update
 
 ```bash
 python main.py recent --update
+```
+
+**6. Update the local library** — scan `--out` for novel IDs (same as GUI Check & Update All) and reuse the episode cache:
+
+```bash
+python main.py local
 ```
 
 ---
