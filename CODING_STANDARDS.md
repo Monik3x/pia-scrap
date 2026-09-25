@@ -6,7 +6,7 @@ A note next to code is a comment when deleting that code would make the note mea
 
 ## Cancel
 
-Cancel by calling `sleep_cooperative` and letting `DownloadCancelled` propagate. Check the event before starting a novel or submitting pool work. A completed pool future is stored before cancel is honored.
+Cancel by calling `sleep_cooperative` and letting `DownloadCancelled` propagate. Check the event before starting a novel or submitting pool work. Check the event before each sequential episode. GUI cancel sets `cancel_event` only; the worker honors it through `sleep_cooperative`. A completed pool future is stored before cancel is honored.
 
 `failed` counts skip and hard-failure statuses. `cancelled` is a separate flag and result status.
 
@@ -37,7 +37,7 @@ Tokens and cookies stay out of `last_run_report.txt`.
 TXT always rewrites chapter files. Only EPUB returns `None` as up to date.
 After a successful TXT write, remove leftover `N_*.txt` files that were not just written.
 
-Config, metadata, cache records, and the final EPUB go through the atomic writers. A failed build leaves the previous artifact in place and does not mark the book updated. `metadata.json` is the update-mode commit marker, so write it last.
+Config, metadata, cache records, and the final EPUB go through the atomic writers. `EpubBuilder` writes a sibling `.tmp` then `os.replace`, because ebooklib emits a binary zip. A failed build leaves the previous artifact in place and does not mark the book updated. `metadata.json` is the update-mode commit marker, so write it last.
 
 EPUB update mode keeps the stored chapter set when `max_chapters` is lower than the local count. A rebuild refetches the full episode list.
 
@@ -67,7 +67,7 @@ API stays in `api.py`, queue in `engine.py`, parse in `novel.py`, output in `bui
 
 ## Tests
 
-Tests assert return values, written files, raised exceptions, cookies actually sent. A test that only snapshots mock kwargs or private helper booleans is not coverage.
+Tests assert return values, written files, raised exceptions, cookies actually sent. A test that only snapshots mock kwargs, stub call counts, or private helper booleans is not coverage.
 
 No live Novelpia calls. Use `tests/conftest.py` fixtures. `FakeSession` lives in `tests/test_api.py` and `tests/test_epub_security.py`.
 

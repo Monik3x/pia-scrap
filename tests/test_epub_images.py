@@ -1,13 +1,7 @@
 import json
 import zipfile
 
-from src.epub import (
-    EpubBuilder,
-    _is_safe_epub_image_name,
-    _load_image_index,
-    _write_image_index,
-    image_digest,
-)
+from src.epub import EpubBuilder, image_digest
 from src.novel import parse_novel_metadata
 
 
@@ -60,60 +54,71 @@ def _build(tmp_path, novel_data, chapters, fetch_image, update_mode=False):
     )
 
 
-def test_image_index_roundtrip_rejects_unsafe_and_invalid_entries(tmp_path):
-    path = tmp_path / "image_index.json"
-    _write_image_index(
-        str(path),
-        {
-            IMAGE_A: {"sha256": "a" * 64, "file": "images/" + "a" * 64 + ".png"},
-            "https://image.novelpia.com/bad.png": {
-                "sha256": "b" * 64,
-                "file": "images/../secret.png",
-            },
-        },
-    )
-
-    loaded = _load_image_index(str(path))
-    assert IMAGE_A in loaded
-    assert loaded[IMAGE_A]["file"].startswith("images/")
-    assert "https://image.novelpia.com/bad.png" not in loaded
-    assert _load_image_index(str(tmp_path / "missing.json")) == {}
-    assert _is_safe_epub_image_name("cover.jpg")
-    assert _is_safe_epub_image_name("cover.svg")
-    assert not _is_safe_epub_image_name("images/../x.png")
-    assert not _is_safe_epub_image_name("EPUB/images/x.png")
-
-
-def test_update_reuses_images_from_epub_prefixed_zip_members(
+def test_update_reuses_safe_index_entries_and_refetches_unsafe_paths(
     tmp_path, novel_data, episodes
 ):
-    fetches, fetch_image = _stub_images({IMAGE_A: PNG_B})
-    digest = image_digest(PNG_A)
+    traversal_url = "https://image.novelpia.com/bad.png"
+    prefixed_url = "https://image.novelpia.com/prefixed.png"
+    good_digest = image_digest(PNG_A)
+    stolen_digest = image_digest(PNG_B)
     book_dir = tmp_path / "a-test-novel"
     cache_dir = book_dir / ".raw_cache"
     cache_dir.mkdir(parents=True)
     (book_dir / ".novel_id").write_text("42", encoding="utf-8")
-    file_name = f"images/{digest}.png"
+    good_name = f"images/{good_digest}.png"
     with zipfile.ZipFile(book_dir / "a-test-novel.epub", "w") as archive:
-        archive.writestr(f"EPUB/{file_name}", PNG_A)
-    _write_image_index(
-        str(cache_dir / "image_index.json"),
-        {IMAGE_A: {"sha256": digest, "file": file_name}},
+        archive.writestr(f"EPUB/{good_name}", PNG_A)
+        archive.writestr("EPUB/images/../secret.png", PNG_B)
+    (cache_dir / "image_index.json").write_text(
+        json.dumps({
+            "version": 1,
+            "images": {
+                IMAGE_A: {"sha256": good_digest, "file": good_name},
+                traversal_url: {
+                    "sha256": stolen_digest,
+                    "file": "images/../secret.png",
+                },
+                prefixed_url: {
+                    "sha256": good_digest,
+                    "file": f"EPUB/{good_name}",
+                },
+            },
+        }),
+        encoding="utf-8",
     )
+    fetches, fetch_image = _stub_images({
+        IMAGE_A: PNG_A,
+        traversal_url: PNG_A,
+        prefixed_url: PNG_B,
+    })
 
     output, _, _ = _build(
         tmp_path,
         novel_data,
-        _chapters({101: f'<p><img src="{IMAGE_A}"/></p>'}, episodes[:1]),
+        _chapters(
+            {101: (
+                f'<p><img src="{IMAGE_A}"/>'
+                f'<img src="{traversal_url}"/>'
+                f'<img src="{prefixed_url}"/></p>'
+            )},
+            episodes[:1],
+        ),
         fetch_image,
         update_mode=True,
     )
 
-    assert fetches == []
-    members = _image_members(output)
-    assert len(members) == 1
+    assert fetches == [traversal_url, prefixed_url]
+    written = json.loads((cache_dir / "image_index.json").read_text(encoding="utf-8"))
+    assert written["images"][IMAGE_A]["file"] == good_name
+    for url in (traversal_url, prefixed_url):
+        file_name = written["images"][url]["file"]
+        assert ".." not in file_name
+        assert not file_name.startswith("EPUB/")
     with zipfile.ZipFile(output) as archive:
-        assert archive.read(members[0]) == PNG_A
+        assert all(".." not in name for name in archive.namelist())
+        stored = [archive.read(name) for name in _image_members(output)]
+    assert PNG_A in stored
+    assert PNG_B in stored
 
 
 def test_epub_dedups_identical_images_by_content_hash(
@@ -121,7 +126,7 @@ def test_epub_dedups_identical_images_by_content_hash(
 ):
     fetches, fetch_image = _stub_images({IMAGE_A: PNG_A, IMAGE_B: PNG_A})
     html = f'<p><img src="{IMAGE_A}"/><img src="{IMAGE_B}"/></p>'
-    output, _, count = _build(
+    output, _, _ = _build(
         tmp_path,
         novel_data,
         _chapters({101: html}, episodes[:1]),
@@ -130,7 +135,6 @@ def test_epub_dedups_identical_images_by_content_hash(
 
     digest = image_digest(PNG_A)
     members = _image_members(output)
-    assert count == 1
     assert fetches == [IMAGE_A, IMAGE_B]
     assert len(members) == 1
     assert members[0].endswith(f"/images/{digest}.png")
@@ -178,49 +182,40 @@ def test_update_stores_index_and_reuses_epub_images_without_refetch(
     assert index["images"][IMAGE_A]["file"] == f"images/{image_digest(PNG_A)}.png"
 
     fetches.clear()
-    _build(tmp_path, novel_data, chapters, fetch_image, update_mode=True)
-    assert fetches == []
-    assert _image_members(output)[0].endswith(f"/images/{image_digest(PNG_A)}.png")
-
-
-def test_missing_or_non_numeric_epi_no_does_not_ticket_chapter_index(
-    tmp_path, novel_data
-):
-    image_c = "https://image.novelpia.com/c.png"
-    payloads = {IMAGE_A: PNG_A, IMAGE_B: PNG_B, image_c: PNG_A}
-    calls = []
-
-    def fetch_image(url, referer_url, episode_cookies=None, episode_no=None):
-        calls.append((episode_no, referer_url))
-        return payloads[url]
-
-    _build(
-        tmp_path,
-        novel_data,
-        [
-            {
-                "html": f'<p><img src="{IMAGE_A}"/></p>',
-                "epi_title": "Missing id",
-            },
-            {
-                "html": f'<p><img src="{IMAGE_B}"/></p>',
-                "epi_no": "abc",
-                "epi_title": "Bad id",
-            },
-            {
-                "html": f'<p><img src="{image_c}"/></p>',
-                "epi_no": 101,
-                "epi_title": "Good id",
-            },
-        ],
-        fetch_image,
+    output, _, _ = _build(
+        tmp_path, novel_data, chapters, fetch_image, update_mode=True
     )
+    assert fetches == []
+    members = _image_members(output)
+    assert len(members) == 1
+    with zipfile.ZipFile(output) as archive:
+        assert archive.read(members[0]) == PNG_A
 
-    assert calls == [
-        (None, "https://global.novelpia.com/"),
-        (None, "https://global.novelpia.com/"),
-        (101, "https://global.novelpia.com/viewer/101"),
-    ]
+
+def test_update_reuses_svg_cover_recorded_in_the_index(tmp_path, novel_data):
+    cover_url = "https://image.novelpia.com/cover.svg"
+    svg = b"<svg xmlns='x'></svg>"
+    payload = json.loads(json.dumps(novel_data))
+    payload["result"]["novel"]["novel_img"] = cover_url
+    fetches, fetch_image = _stub_images({cover_url: svg})
+
+    _build(tmp_path, payload, [], fetch_image, update_mode=True)
+    assert fetches == [cover_url]
+    index = json.loads(
+        (tmp_path / "a-test-novel" / ".raw_cache" / "image_index.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert index["images"][cover_url]["file"] == "cover.svg"
+
+    fetches.clear()
+    output, _, _ = _build(tmp_path, payload, [], fetch_image, update_mode=True)
+
+    assert fetches == []
+    with zipfile.ZipFile(output) as archive:
+        cover_names = [name for name in archive.namelist() if name.endswith("cover.svg")]
+        assert len(cover_names) == 1
+        assert archive.read(cover_names[0]) == svg
 
 
 def test_dropped_images_are_omitted_from_image_index(

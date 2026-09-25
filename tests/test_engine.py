@@ -27,27 +27,25 @@ def test_engine_validates_numeric_settings(kwargs):
         engine.ScraperEngine(**kwargs)
 
 
-def test_initialize_client_reuses_stored_auth(monkeypatch):
-    created = []
-    me_calls = []
-
+def test_initialize_client_reuses_stored_auth_and_logs_account(monkeypatch, caplog):
     class Client:
         def __init__(self, **kwargs):
-            created.append(kwargs)
             self.tokens = SimpleNamespace(login_at=None)
 
         def me(self):
-            me_calls.append(True)
-            return {"result": {"ok": True}}
+            return {"result": {"login": {"mem_nick": "tester", "mem_plus_type": 0}}}
 
-    monkeypatch.setattr(engine, "load_config", lambda: {"login_at": "login", "userkey": "user", "tkey": "t"})
+    monkeypatch.setattr(engine, "load_config", lambda: {
+        "login_at": "login", "userkey": "user", "tkey": "t",
+    })
     monkeypatch.setattr(engine, "NovelpiaClient", Client)
     scraper = engine.ScraperEngine()
 
-    assert scraper.initialize_client()
+    with caplog.at_level(logging.INFO, logger="pia_scrap"):
+        assert scraper.initialize_client()
+
     assert scraper.client.tokens.login_at == "login"
-    assert created[0]["userkey"] == "user"
-    assert len(me_calls) == 1
+    assert "account=free nick='tester'" in caplog.text
 
 
 def test_initialize_client_requires_login_when_stored_auth_fails(monkeypatch):
@@ -66,7 +64,7 @@ def test_initialize_client_requires_login_when_stored_auth_fails(monkeypatch):
         scraper.initialize_client()
 
 
-def test_initialize_client_logs_in_and_saves_tokens(monkeypatch):
+def test_initialize_client_logs_in_saves_tokens_and_logs_account(monkeypatch, caplog):
     saved = []
 
     class Cookies(dict):
@@ -81,19 +79,23 @@ def test_initialize_client_logs_in_and_saves_tokens(monkeypatch):
             self.tokens.login_at = "new-login"
 
         def me(self):
-            return {"result": {"login": {"mem_plus_type": 0}}}
+            return {"result": {"login": {"mem_nick": "tester", "mem_plus_type": 1}}}
 
     monkeypatch.setattr(engine, "load_config", lambda: {})
+
     def save(tokens):
         saved.append(tokens)
         return True
 
     monkeypatch.setattr(engine, "save_config", save)
     monkeypatch.setattr(engine, "NovelpiaClient", Client)
-
     scraper = engine.ScraperEngine(email="me@test", password="secret")
-    assert scraper.initialize_client()
+
+    with caplog.at_level(logging.INFO, logger="pia_scrap"):
+        assert scraper.initialize_client()
+
     assert saved == [{"login_at": "new-login", "userkey": "new-user", "tkey": "new-token"}]
+    assert "account=paid nick='tester'" in caplog.text
 
 
 def test_initialize_client_reports_token_persistence_failure(monkeypatch):
@@ -126,58 +128,6 @@ def test_initialize_client_returns_false_without_auth(monkeypatch):
     monkeypatch.delenv("NOVELPIA_EMAIL", raising=False)
     monkeypatch.delenv("NOVELPIA_PASSWORD", raising=False)
     assert not engine.ScraperEngine().initialize_client()
-
-
-def test_initialize_client_logs_account_status_from_stored_me(monkeypatch, caplog):
-    class Client:
-        def __init__(self, **kwargs):
-            self.tokens = SimpleNamespace(login_at=None)
-            self.me_calls = 0
-
-        def me(self):
-            self.me_calls += 1
-            return {"result": {"login": {"mem_nick": "tester", "mem_plus_type": 0}}}
-
-    monkeypatch.setattr(engine, "load_config", lambda: {
-        "login_at": "login", "userkey": "user", "tkey": "t",
-    })
-    monkeypatch.setattr(engine, "NovelpiaClient", Client)
-    scraper = engine.ScraperEngine()
-
-    with caplog.at_level(logging.INFO, logger="pia_scrap"):
-        assert scraper.initialize_client()
-
-    assert scraper.client.me_calls == 1
-    assert "account=free nick='tester'" in caplog.text
-
-
-def test_initialize_client_logs_account_status_after_login(monkeypatch, caplog):
-    class Cookies(dict):
-        pass
-
-    class Client:
-        def __init__(self, **kwargs):
-            self.tokens = SimpleNamespace(login_at=None, tkey="token-fallback")
-            self.s = SimpleNamespace(cookies=Cookies(USERKEY="new-user", TKEY="new-token"))
-            self.me_calls = 0
-
-        def login(self):
-            self.tokens.login_at = "new-login"
-
-        def me(self):
-            self.me_calls += 1
-            return {"result": {"login": {"mem_nick": "tester", "mem_plus_type": 1}}}
-
-    monkeypatch.setattr(engine, "load_config", lambda: {})
-    monkeypatch.setattr(engine, "save_config", lambda config: True)
-    monkeypatch.setattr(engine, "NovelpiaClient", Client)
-    scraper = engine.ScraperEngine(email="me@test", password="secret")
-
-    with caplog.at_level(logging.INFO, logger="pia_scrap"):
-        assert scraper.initialize_client()
-
-    assert scraper.client.me_calls == 1
-    assert "account=paid nick='tester'" in caplog.text
 
 
 def test_initialize_client_login_continues_when_account_status_fails(monkeypatch, caplog):
@@ -258,12 +208,11 @@ def test_download_queue_aggregates_success_skip_and_failure(monkeypatch, tmp_pat
         raise NoMetadataError(f"Novel {novel_id} returned no metadata.")
 
     monkeypatch.setattr(engine, "build_epub", fake_build)
-    slept = []
     statuses = []
     scraper = engine.ScraperEngine(
         out_dir=str(tmp_path), status_callback=statuses.append
     )
-    scraper.client = SimpleNamespace(sleep_cooperative=slept.append)
+    scraper.client = SimpleNamespace(sleep_cooperative=lambda seconds: None)
 
     result = scraper.run_download_queue([1, 2, 3])
 
@@ -272,7 +221,7 @@ def test_download_queue_aggregates_success_skip_and_failure(monkeypatch, tmp_pat
     assert result["failed"] == 1
     assert [item["status"] for item in result["results"]] == ["success", "skipped", "not_exist"]
     assert result["results"][2]["error"] == "Novel 3 returned no metadata. Skipping."
-    assert slept == [1.0]
+    assert statuses.count("[success] Wrote EPUB: one.epub | Title: One | Chapters: 3") == 1
     assert statuses.count("[skipped] Novel 'Two' is already up to date (4 chapters). Skipping.") == 1
     assert "[warn] Novel 3 returned no metadata. Skipping." in statuses
     assert any("Finished queue" in status for status in statuses)
@@ -339,27 +288,24 @@ def test_plain_value_error_is_hard_failure(monkeypatch, tmp_path, caplog):
     with caplog.at_level("ERROR", logger="pia_scrap"):
         result = scraper.run_download_queue([3])
 
-    assert result["results"] == [
-        {"novel_id": 3, "status": "failed", "error": "Novel 3 returned no metadata."}
-    ]
+    entry = result["results"][0]
+    assert entry == {
+        "novel_id": 3,
+        "status": "failed",
+        "error": "Novel 3 returned no metadata.",
+    }
+    assert "issues" not in entry
+    assert "ID 3: Novel 3 returned no metadata." in engine.format_run_recap(result)
     assert any("Failed processing 3" in status for status in statuses)
     assert "Traceback" in caplog.text
 
 
-def test_download_queue_passes_update_mode_to_txt(monkeypatch, tmp_path):
-    received = []
-    book_index = {1: "existing-book"}
-
-    def fake_build_txt(client, novel_id, **kwargs):
-        received.append(kwargs)
-        return "out", "Book", 1
-
-    monkeypatch.setattr(engine, "build_txt", fake_build_txt)
+def test_download_queue_txt_mode_writes_txt_result_not_epub(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        engine, "build_epub", lambda *args, **kwargs: pytest.fail("epub builder called")
+        engine, "build_txt", lambda *args, **kwargs: (str(tmp_path / "book"), "Book", 1)
     )
     monkeypatch.setattr(
-        engine, "build_book_directory_index", lambda out_dir: book_index
+        engine, "build_epub", lambda *args, **kwargs: pytest.fail("epub builder called")
     )
     scraper = engine.ScraperEngine(
         out_dir=str(tmp_path), txt_mode=True, update_mode=True
@@ -369,10 +315,13 @@ def test_download_queue_passes_update_mode_to_txt(monkeypatch, tmp_path):
     result = scraper.run_download_queue([1])
 
     assert result["success"] == 1
-    assert scraper.update_mode is True
-    assert received[0]["update_mode"] is True
-    assert received[0]["book_index"] is book_index
-    assert received[0]["progress_cb"] == scraper.update_progress
+    assert result["results"] == [{
+        "novel_id": 1,
+        "status": "success",
+        "title": "Book",
+        "count": 1,
+        "type": "txt",
+    }]
 
 
 def test_download_queue_stops_before_work_when_cancelled(monkeypatch, tmp_path):
@@ -400,10 +349,7 @@ def test_download_queue_stops_before_work_when_cancelled(monkeypatch, tmp_path):
 def test_download_queue_keeps_summary_when_cancelled_during_failure_backoff(
     monkeypatch, tmp_path
 ):
-    built = []
-
     def fake_build(client, novel_id, **kwargs):
-        built.append(novel_id)
         raise RuntimeError("first novel failed")
 
     monkeypatch.setattr(engine, "build_epub", fake_build)
@@ -419,7 +365,6 @@ def test_download_queue_keeps_summary_when_cancelled_during_failure_backoff(
 
     result = scraper.run_download_queue([1, 2])
 
-    assert built == [1]
     assert _core_queue_result(result) == {
         "success": 0,
         "skipped": 0,
@@ -563,22 +508,6 @@ def test_download_queue_captures_run_level_index_warnings(monkeypatch, tmp_path)
     recap = engine.format_run_recap(result)
     assert "Run-level warnings:" in recap
     assert "Warnings: 1" in recap
-
-
-def test_download_queue_does_not_duplicate_hard_failure_as_issue(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        engine,
-        "build_epub",
-        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("disk full")),
-    )
-    scraper = engine.ScraperEngine(out_dir=str(tmp_path))
-    scraper.client = SimpleNamespace(sleep_cooperative=lambda seconds: None)
-    result = scraper.run_download_queue([9])
-    assert result["results"][0]["status"] == "failed"
-    assert result["results"][0]["error"] == "disk full"
-    assert "issues" not in result["results"][0]
-    recap = engine.format_run_recap(result)
-    assert "ID 9: disk full" in recap
 
 
 def test_download_queue_warnings_scoped_per_novel(monkeypatch, tmp_path):

@@ -80,13 +80,13 @@ def _client_with_session(session):
 def test_request_retries_server_errors(monkeypatch):
     session = FakeSession([FakeResponse(500), FakeResponse(200, {"ok": True})])
     waits = []
-    monkeypatch.setattr(api, "_wait_for_retry", lambda seconds, event, reason: waits.append(reason))
+    monkeypatch.setattr(api, "_wait_for_retry", lambda seconds, event, reason: waits.append(seconds))
 
     response = api.request_with_retries(session, "GET", "https://example.test/data", max_retries=2)
 
     assert response.status_code == 200
     assert len(session.calls) == 2
-    assert waits == ["server-error backoff"]
+    assert len(waits) == 1
     assert "USERKEY=u" in session.calls[0][2]["headers"]["Cookie"]
 
 
@@ -94,7 +94,7 @@ def test_request_returns_classified_ticket_500_without_backoff(monkeypatch):
     body = _ticket_block_body("0008", "novel.ADVERTISEMENT_EPISODE", 23, 2407)
     session = FakeSession([FakeResponse(500, body)])
     waits = []
-    monkeypatch.setattr(api, "_wait_for_retry", lambda seconds, event, reason: waits.append(reason))
+    monkeypatch.setattr(api, "_wait_for_retry", lambda seconds, event, reason: waits.append(seconds))
 
     response = api.request_with_retries(
         session, "GET", "https://example.test/v1/novel/episode", max_retries=4
@@ -105,33 +105,30 @@ def test_request_returns_classified_ticket_500_without_backoff(monkeypatch):
     assert waits == []
 
 
-def test_episode_ticket_classifies_ad_block_without_retrying(monkeypatch):
+@pytest.mark.parametrize(
+    ("code", "errmsg", "novel_no", "episode_no", "message"),
+    [
+        ("0008", "novel.ADVERTISEMENT_EPISODE", 23, 2407, "^ad-gated episode$"),
+        ("0009", "novel.PREMIUM_EPISODE", "23", "2408", "^premium episode blocked$"),
+    ],
+)
+def test_episode_ticket_classifies_access_blocks_without_retrying(
+    monkeypatch, code, errmsg, novel_no, episode_no, message
+):
     monkeypatch.setattr(api, "_wait_for_retry", lambda seconds, event, reason: pytest.fail(reason))
-    body = _ticket_block_body("0008", "novel.ADVERTISEMENT_EPISODE", 23, 2407)
+    body = _ticket_block_body(code, errmsg, novel_no, episode_no)
     session = FakeSession([FakeResponse(500, body)])
     client = _client_with_session(session)
 
-    with pytest.raises(api.TicketAccessError, match="^ad-gated episode$"):
-        client.episode_ticket(2407)
-
-    assert len(session.calls) == 1
-
-
-def test_episode_ticket_classifies_premium_block_without_retrying(monkeypatch):
-    monkeypatch.setattr(api, "_wait_for_retry", lambda seconds, event, reason: pytest.fail(reason))
-    body = _ticket_block_body("0009", "novel.PREMIUM_EPISODE", "23", "2408")
-    session = FakeSession([FakeResponse(500, body)])
-    client = _client_with_session(session)
-
-    with pytest.raises(api.TicketAccessError, match="^premium episode blocked$"):
-        client.episode_ticket(2408)
+    with pytest.raises(api.TicketAccessError, match=message):
+        client.episode_ticket(int(episode_no))
 
     assert len(session.calls) == 1
 
 
 def test_episode_ticket_malformed_block_body_retries_as_unknown_500(monkeypatch):
     waits = []
-    monkeypatch.setattr(api, "_wait_for_retry", lambda seconds, event, reason: waits.append(reason))
+    monkeypatch.setattr(api, "_wait_for_retry", lambda seconds, event, reason: waits.append(seconds))
     body = {
         "code": "0008",
         "errmsg": "novel.ADVERTISEMENT_EPISODE",
@@ -144,12 +141,12 @@ def test_episode_ticket_malformed_block_body_retries_as_unknown_500(monkeypatch)
         client.episode_ticket(2407)
 
     assert len(session.calls) == 4
-    assert waits == ["server-error backoff"] * 3
+    assert len(waits) == 3
 
 
 def test_episode_ticket_unknown_500_still_retries(monkeypatch):
     waits = []
-    monkeypatch.setattr(api, "_wait_for_retry", lambda seconds, event, reason: waits.append(reason))
+    monkeypatch.setattr(api, "_wait_for_retry", lambda seconds, event, reason: waits.append(seconds))
     session = FakeSession(
         [
             FakeResponse(500, {"errmsg": "temporary"}),
@@ -164,7 +161,7 @@ def test_episode_ticket_unknown_500_still_retries(monkeypatch):
 
     assert ticket == {"result": {"token": "fixture-token"}}
     assert len(session.calls) == 4
-    assert waits == ["server-error backoff"] * 3
+    assert len(waits) == 3
 
 
 def test_novel_maps_server_error_to_unavailable_novel(monkeypatch):
@@ -229,7 +226,7 @@ def test_novel_auth_recovery_does_not_inject_login_at():
     assert "USERKEY=u" in session.calls[1][2]["headers"]["Cookie"]
 
 
-def test_api_request_injects_shared_auth_kwargs():
+def test_me_sends_login_at_and_refreshes_it_on_the_retry():
     session = FakeSession([
         FakeResponse(401),
         FakeResponse(200, {"ok": True}),
@@ -244,9 +241,7 @@ def test_api_request_injects_shared_auth_kwargs():
     client.refresh = refresh
     client.login = lambda: pytest.fail("login should not run")
 
-    response = client._api_request("GET", "https://example.test/v1/login/me")
-
-    assert response.status_code == 200
+    assert client.me() == {"ok": True}
     assert refreshes == ["fresh-login-at"]
     assert len(session.calls) == 2
     assert session.calls[0][2]["headers"]["login-at"] == "old-login"
@@ -267,9 +262,6 @@ def test_episode_list_maps_missing_episodes_to_no_episodes_error(monkeypatch):
         },
     }
     response = FakeResponse(500, payload)
-    assert api._response_indicates_missing_episodes(response)
-    assert not api._response_indicates_missing_novel(response)
-
     client = make_api_client()
     monkeypatch.setattr(
         api,
@@ -369,7 +361,7 @@ def test_request_stops_retrying_at_max_retries(monkeypatch):
     monkeypatch.setattr(
         api,
         "_wait_for_retry",
-        lambda seconds, event, reason: waits.append((seconds, reason)),
+        lambda seconds, event, reason: waits.append(seconds),
     )
 
     response = api.request_with_retries(
@@ -381,10 +373,7 @@ def test_request_stops_retrying_at_max_retries(monkeypatch):
 
     assert response is final_response
     assert len(session.calls) == 3
-    assert waits == [
-        (1.25, "server-error backoff"),
-        (1.5625, "server-error backoff"),
-    ]
+    assert len(waits) == 2
 
 
 def test_cancellation_interrupts_rate_limit_wait():
@@ -442,23 +431,6 @@ def test_auth_recovery_preserves_headers_that_omitted_login_at():
     assert "login-at" not in session.calls[1][2]["headers"]
 
 
-def test_refresh_keeps_in_memory_token_when_persistence_fails(monkeypatch, caplog):
-    client = make_api_client(login_at="old-token")
-    monkeypatch.setattr(
-        api,
-        "request_with_retries",
-        lambda *args, **kwargs: FakeResponse(200, {"result": {"LOGINAT": "fresh-token"}}),
-    )
-    monkeypatch.setattr(api, "load_config", lambda: {})
-    monkeypatch.setattr(api, "save_config", lambda config: False)
-
-    with caplog.at_level("WARNING", logger="pia_scrap"):
-        assert client.refresh() == "fresh-token"
-
-    assert client.tokens.login_at == "fresh-token"
-    assert "refreshed in memory, but could not be stored" in caplog.text
-
-
 def test_login_persists_tokens(monkeypatch):
     client = make_api_client()
     client.email = "user@example.test"
@@ -486,7 +458,8 @@ def test_login_persists_tokens(monkeypatch):
     }]
 
 
-def test_login_keeps_in_memory_token_when_persistence_fails(monkeypatch, caplog):
+@pytest.mark.parametrize("method_name", ["login", "refresh"])
+def test_auth_keeps_in_memory_token_when_persistence_fails(monkeypatch, caplog, method_name):
     client = make_api_client(login_at="old-token")
     client.email = "user@example.test"
     client.password = "pw"
@@ -495,17 +468,18 @@ def test_login_keeps_in_memory_token_when_persistence_fails(monkeypatch, caplog)
     monkeypatch.setattr(
         api,
         "request_with_retries",
-        lambda *args, **kwargs: FakeResponse(200, {"result": {"LOGINAT": "new-login"}}),
+        lambda *args, **kwargs: FakeResponse(200, {"result": {"LOGINAT": "fresh-token"}}),
     )
     monkeypatch.setattr(api, "load_config", lambda: {})
     monkeypatch.setattr(api, "save_config", lambda config: False)
 
     with caplog.at_level("WARNING", logger="pia_scrap"):
-        assert client.login() == "new-login"
+        assert getattr(client, method_name)() == "fresh-token"
 
-    assert client.tokens.login_at == "new-login"
-    assert client.tokens.userkey == "new-user"
-    assert client.tokens.tkey == "new-tkey"
+    assert client.tokens.login_at == "fresh-token"
+    if method_name == "login":
+        assert client.tokens.userkey == "new-user"
+        assert client.tokens.tkey == "new-tkey"
     assert "refreshed in memory, but could not be stored" in caplog.text
 
 
@@ -605,17 +579,9 @@ def test_recent_novels_filters_k_premium_and_preserves_api_order(monkeypatch):
             {"unexpected": True},
         ]}
     })
-    calls = []
-
-    def fake_request(*args, **kwargs):
-        calls.append((args, kwargs))
-        return response
-
-    monkeypatch.setattr(api, "request_with_retries", fake_request)
+    monkeypatch.setattr(api, "request_with_retries", lambda *args, **kwargs: response)
 
     assert client.recent_novels() == [40, 42]
-    assert calls[0][0][2].endswith("/v1/novel/list")
-    assert calls[0][1]["params"] == {"rows": 30}
 
 
 def test_recent_novels_rejects_invalid_row_count():
@@ -730,6 +696,9 @@ def test_fetch_episode_reports_missing_number_and_empty_content():
 
 def test_fetch_episode_keeps_non_cancel_errors_chapter_scoped():
     client = make_api_client()
+    content_calls = []
+    client.episode_content = lambda token: content_calls.append(token) or {}
+
     client.episode_ticket = lambda epi_no: (_ for _ in ()).throw(ValueError("bad ticket"))
     assert client.fetch_episode({"episode_no": 12, "epi_title": "Prologue"}) == {
         "error": "bad ticket",
@@ -738,28 +707,20 @@ def test_fetch_episode_keeps_non_cancel_errors_chapter_scoped():
     }
 
     client.episode_ticket = lambda epi_no: (_ for _ in ()).throw(
-        api.DownloadCancelled("Request cancelled during wait.")
-    )
-    with pytest.raises(api.DownloadCancelled):
-        client.fetch_episode({"episode_no": 12, "epi_title": "Prologue"})
-
-
-def test_fetch_episode_maps_ad_block_to_chapter_error_dict():
-    client = make_api_client()
-    content_calls = []
-    client.episode_ticket = lambda epi_no: (_ for _ in ()).throw(
         api.TicketAccessError("ad-gated episode")
     )
-    client.episode_content = lambda token: content_calls.append(token) or {}
-
-    result = client.fetch_episode({"episode_no": 2407, "epi_title": "Prologue"})
-
-    assert result == {
+    assert client.fetch_episode({"episode_no": 2407, "epi_title": "Prologue"}) == {
         "error": "ad-gated episode",
         "epi_no": 2407,
         "epi_title": "Prologue",
     }
     assert content_calls == []
+
+    client.episode_ticket = lambda epi_no: (_ for _ in ()).throw(
+        api.DownloadCancelled("Request cancelled during wait.")
+    )
+    with pytest.raises(api.DownloadCancelled):
+        client.fetch_episode({"episode_no": 12, "epi_title": "Prologue"})
 
 
 def test_episode_content_omits_login_at_and_skips_auth_recovery():
@@ -796,12 +757,13 @@ def test_fetch_episode_remints_ticket_on_content_403():
 
     assert result["html"] == "<p>ok</p>"
     assert result["epi_no"] == 2407
-    assert [call[0] for call in session.calls] == ["GET", "GET", "GET", "GET"]
-    assert session.calls[0][1].endswith("/v1/novel/episode")
-    assert session.calls[1][1].endswith("/v1/novel/episode/content")
-    assert session.calls[2][1].endswith("/v1/novel/episode")
-    assert session.calls[3][1].endswith("/v1/novel/episode/content")
-    assert 1.0 in sleeps
+    assert [call[1].rsplit("/", 1)[-1] for call in session.calls] == [
+        "episode",
+        "content",
+        "episode",
+        "content",
+    ]
+    assert api.CONTENT_REMINT_WAIT_SECONDS in sleeps
 
 
 def test_fetch_episode_gives_up_after_three_content_403s():

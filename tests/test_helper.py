@@ -75,17 +75,38 @@ def test_image_type_uses_file_signature(data, fallback, expected):
     assert helper.image_type(data, fallback) == expected
 
 
-def test_token_detection_and_extraction():
-    jwt = "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxIn0.c2ln"
-    assert helper.looks_like_jwt(jwt)
-    assert not helper.looks_like_jwt("not-a-jwt")
-    assert helper.extract_t_token({"result": {"nested": {"token": jwt}}}) == jwt
-
-
-def test_extract_token_from_official_content_url():
-    url = "https://api-global.novelpia.com/v1/novel/episode/content?_t=simple-token"
-    assert helper.extract_t_token({"result": {"url": url}}) == "simple-token"
-    assert helper.extract_t_token({"result": {"url": "https://evil.test/content?_t=x"}}) is None
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (
+            {"result": {"nested": {"token": "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxIn0.c2ln"}}},
+            "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxIn0.c2ln",
+        ),
+        (
+            {
+                "result": {
+                    "_t": "simple-token",
+                    "token": "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxIn0.c2ln",
+                }
+            },
+            "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxIn0.c2ln",
+        ),
+        (
+            {
+                "result": {
+                    "url": (
+                        "https://api-global.novelpia.com/v1/novel/episode/content"
+                        "?_t=simple-token"
+                    )
+                }
+            },
+            "simple-token",
+        ),
+        ({"result": {"url": "https://evil.test/content?_t=x"}}, None),
+    ],
+)
+def test_extract_t_token_reads_nested_and_official_content_urls(payload, expected):
+    assert helper.extract_t_token(payload) == expected
 
 
 def test_attach_auth_cookies_does_not_replace_explicit_cookie():
@@ -108,20 +129,30 @@ def test_atomic_writes_create_parent_and_valid_json(tmp_path):
     assert not list(json_path.parent.glob(".tmp-*"))
 
 
-def test_book_base_reuses_matching_novel_and_disambiguates_collision(tmp_path):
-    book_dir = tmp_path / "same-title"
-    book_dir.mkdir()
-    (book_dir / "metadata.json").write_text(json.dumps({"novel_id": 42}), encoding="utf-8")
+def test_book_base_keeps_owned_folder_and_disambiguates_collisions(tmp_path):
+    owned = tmp_path / "owned"
+    owned.mkdir()
+    (owned / "same-title").mkdir()
+    (owned / "same-title" / "metadata.json").write_text(
+        json.dumps({"novel_id": 42}), encoding="utf-8"
+    )
+    assert helper.book_base(str(owned), "Same Title", 42) == "same-title"
+    assert helper.book_base(str(owned), "Same Title", 99) == "same-title-99"
 
-    assert helper.book_base(str(tmp_path), "Same Title", 42) == "same-title"
-    assert helper.book_base(str(tmp_path), "Same Title", 99) == "same-title-99"
+    taken = tmp_path / "taken"
+    taken.mkdir()
+    (taken / "same-title").mkdir()
+    (taken / "same-title-99").mkdir()
+    assert helper.book_base(str(taken), "Same Title", 99) == "same-title-99-2"
 
-
-def test_book_base_handles_secondary_collision(tmp_path):
-    (tmp_path / "same-title").mkdir()
-    (tmp_path / "same-title-99").mkdir()
-
-    assert helper.book_base(str(tmp_path), "Same Title", 99) == "same-title-99-2"
+    renamed = tmp_path / "renamed"
+    renamed.mkdir()
+    (renamed / "old-title").mkdir()
+    (renamed / "old-title" / ".novel_id").write_text("42", encoding="ascii")
+    assert helper.book_base(str(renamed), "New Title", 42) == "old-title"
+    index = helper.build_book_directory_index(str(renamed))
+    assert index == {42: "old-title"}
+    assert helper.book_base(str(renamed), "New Title", 42, book_index=index) == "old-title"
 
 
 def test_ensure_book_identity_writes_marker_and_rejects_conflicts(tmp_path):
@@ -133,26 +164,6 @@ def test_ensure_book_identity_writes_marker_and_rejects_conflicts(tmp_path):
     helper.ensure_book_identity(paths)
     with pytest.raises(ValueError, match="belongs to novel ID 42"):
         helper.ensure_book_identity(replace(paths, novel_id=99))
-
-
-def test_book_base_finds_existing_novel_after_remote_rename(tmp_path):
-    old_book_dir = tmp_path / "old-title"
-    old_book_dir.mkdir()
-    (old_book_dir / ".novel_id").write_text("42", encoding="ascii")
-
-    assert helper.book_base(str(tmp_path), "New Title", 42) == "old-title"
-
-
-def test_directory_index_reuses_single_library_scan(tmp_path):
-    for name, novel_id in (("first", 1), ("second", 2)):
-        book_dir = tmp_path / name
-        book_dir.mkdir()
-        (book_dir / ".novel_id").write_text(str(novel_id), encoding="ascii")
-
-    index = helper.build_book_directory_index(str(tmp_path))
-
-    assert index == {1: "first", 2: "second"}
-    assert helper.book_base(str(tmp_path), "Renamed First", 1, index) == "first"
 
 
 def test_book_output_paths_returns_one_consistent_layout(tmp_path):
@@ -175,45 +186,28 @@ def test_book_output_paths_rejects_invalid_novel_id(tmp_path, novel_id):
         helper.book_output_paths(str(tmp_path), "Book", novel_id)
 
 
-def test_book_directory_novel_id_prefers_marker_over_metadata(tmp_path):
-    book_dir = tmp_path / "renamed"
-    book_dir.mkdir()
-    (book_dir / ".novel_id").write_text("42", encoding="ascii")
-    (book_dir / "metadata.json").write_text(
-        json.dumps({"novel_id": 99, "url": "https://global.novelpia.com/novel/7"}),
-        encoding="utf-8",
-    )
-
-    assert helper.book_directory_novel_id(str(book_dir)) == 42
-
-
-@pytest.mark.parametrize("value", ["0", "-5", "nope"])
-def test_book_directory_novel_id_rejects_non_positive_and_invalid_ids(tmp_path, value):
+@pytest.mark.parametrize(
+    ("marker", "metadata", "expected"),
+    [
+        ("42", {"novel_id": 99, "url": "https://global.novelpia.com/novel/7"}, 42),
+        ("0", None, None),
+        ("-5", None, None),
+        ("nope", None, None),
+        ("0", {"novel_id": 42}, 42),
+        (None, {"url": "https://global.novelpia.com/novel/86"}, 86),
+    ],
+)
+def test_book_directory_novel_id_prefers_marker_then_metadata(
+    tmp_path, marker, metadata, expected
+):
     book_dir = tmp_path / "book"
     book_dir.mkdir()
-    (book_dir / ".novel_id").write_text(value, encoding="ascii")
+    if marker is not None:
+        (book_dir / ".novel_id").write_text(marker, encoding="ascii")
+    if metadata is not None:
+        (book_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
 
-    assert helper.book_directory_novel_id(str(book_dir)) is None
-
-
-def test_book_directory_novel_id_falls_through_invalid_marker_to_metadata(tmp_path):
-    book_dir = tmp_path / "book"
-    book_dir.mkdir()
-    (book_dir / ".novel_id").write_text("0", encoding="ascii")
-    (book_dir / "metadata.json").write_text(json.dumps({"novel_id": 42}), encoding="utf-8")
-
-    assert helper.book_directory_novel_id(str(book_dir)) == 42
-
-
-def test_book_directory_novel_id_falls_back_to_metadata_url(tmp_path):
-    book_dir = tmp_path / "from-url"
-    book_dir.mkdir()
-    (book_dir / "metadata.json").write_text(
-        json.dumps({"url": "https://global.novelpia.com/novel/86"}),
-        encoding="utf-8",
-    )
-
-    assert helper.book_directory_novel_id(str(book_dir)) == 86
+    assert helper.book_directory_novel_id(str(book_dir)) == expected
 
 
 def test_load_local_book_info_resolves_marker_when_metadata_is_missing(tmp_path):
@@ -274,17 +268,6 @@ def test_local_library_novel_ids_includes_marker_only_folders(tmp_path):
     assert helper.local_library_novel_ids(str(tmp_path)) == [42, 7]
 
 
-def test_local_library_novel_ids_skips_non_positive_ids(tmp_path):
-    bad = tmp_path / "bad"
-    bad.mkdir()
-    (bad / ".novel_id").write_text("-5", encoding="ascii")
-    good = tmp_path / "good"
-    good.mkdir()
-    (good / ".novel_id").write_text("42", encoding="ascii")
-
-    assert helper.local_library_novel_ids(str(tmp_path)) == [42]
-
-
 def test_load_local_book_info_logs_corrupt_metadata(tmp_path, caplog):
     book_dir = tmp_path / "book"
     book_dir.mkdir()
@@ -337,12 +320,13 @@ def test_book_dir_scans_include_dot_dirs_except_library_listing(tmp_path):
 
 
 def test_save_config_reports_success_and_failure(monkeypatch, tmp_path):
-    monkeypatch.setattr(helper, "CONFIG_PATH", str(tmp_path / "config.json"))
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(helper, "CONFIG_PATH", str(config_path))
     assert helper.save_config({"login_at": "token"}) is True
+    assert json.loads(config_path.read_text(encoding="utf-8")) == {"login_at": "token"}
 
-    monkeypatch.setattr(
-        helper,
-        "write_json_atomic",
-        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("read only")),
-    )
-    assert helper.save_config({"login_at": "token"}) is False
+    # Path exists as a directory so the atomic replace cannot write the file.
+    config_path.unlink()
+    config_path.mkdir()
+    assert helper.save_config({"login_at": "other"}) is False
+    assert config_path.is_dir()

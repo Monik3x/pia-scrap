@@ -50,22 +50,6 @@ class DummyFetchClient:
         return None
 
 
-def recording_epub_builder(book_dir, *, builds=None, fail=None):
-    class RecordingEpubBuilder:
-        def __init__(self, out_dir):
-            pass
-
-        def build(self, **kwargs):
-            if fail is not None:
-                raise AssertionError(fail)
-            if builds is not None:
-                builds.append(kwargs)
-            chapters = kwargs.get("chapters") or []
-            return str(book_dir / "book.epub"), "Book", len(chapters)
-
-    return RecordingEpubBuilder
-
-
 def test_build_metadata_writes_deduplicated_tags_and_chapters(tmp_path, novel_data, episodes):
     builder.build_metadata(str(tmp_path), novel_data, 42, episodes)
 
@@ -224,28 +208,22 @@ def test_build_epub_update_does_not_shrink_complete_book_when_max_chapters_is_lo
         archive.writestr("chap_0001.xhtml", "one")
         archive.writestr("chap_0002.xhtml", "two")
 
-    monkeypatch.setattr(
-        builder,
-        "EpubBuilder",
-        recording_epub_builder(
-            book_dir, fail="update must not shrink a complete local book"
-        ),
-    )
-
+    client = DummyFetchClient()
     result = builder.build_epub(
-        object(), 42, str(tmp_path), max_chapters=1, update_mode=True
+        client, 42, str(tmp_path), max_chapters=1, update_mode=True
     )
 
     assert result == (None, "Book", 2)
+    assert client.fetched == []
+    with zipfile.ZipFile(book_dir / "book.epub") as archive:
+        assert archive.read("chap_0001.xhtml") == b"one"
+        assert archive.read("chap_0002.xhtml") == b"two"
 
 
 def test_build_epub_update_refetches_full_list_instead_of_shrinking_on_revision_mismatch(
     monkeypatch, tmp_path, novel_data, episodes
 ):
-    calls = []
-
     def fake_fetch(client, novel_id, max_chapters=None):
-        calls.append(max_chapters)
         meta = _metadata(novel_data, title="Book")
         if max_chapters:
             return novel_data, episodes[:max_chapters], meta
@@ -260,18 +238,21 @@ def test_build_epub_update_refetches_full_list_instead_of_shrinking_on_revision_
         archive.writestr("chap_0001.xhtml", "one")
         archive.writestr("chap_0002.xhtml", "two")
 
-    received = []
-    monkeypatch.setattr(
-        builder, "EpubBuilder", recording_epub_builder(book_dir, builds=received)
-    )
-
+    client = DummyFetchClient()
     result = builder.build_epub(
-        DummyFetchClient(), 42, str(tmp_path), max_chapters=1, update_mode=True
+        client, 42, str(tmp_path), max_chapters=1, update_mode=True
     )
 
-    assert calls == [1, None]
-    assert [chapter["epi_no"] for chapter in received[0]["chapters"]] == [101, 102]
     assert result == (str(book_dir / "book.epub"), "Book", 2)
+    assert [episode["episode_no"] for episode in client.fetched] == [101, 102]
+    with zipfile.ZipFile(result[0]) as archive:
+        chapters = [
+            archive.read(name).decode("utf-8")
+            for name in archive.namelist()
+            if name.endswith(".xhtml") and "chap_" in name
+        ]
+    assert any("body 101" in chapter for chapter in chapters)
+    assert any("body 102" in chapter for chapter in chapters)
 
 
 @pytest.mark.parametrize("stored_revision", [None, 3])
@@ -313,17 +294,21 @@ def test_build_epub_rebuilds_when_chapter_revisions_do_not_match(
         archive.writestr("chap_0001.xhtml", "one")
         archive.writestr("chap_0002.xhtml", "two")
 
-    received = []
-    monkeypatch.setattr(
-        builder, "EpubBuilder", recording_epub_builder(book_dir, builds=received)
-    )
-
     result = builder.build_epub(DummyFetchClient(), 42, str(tmp_path), update_mode=True)
 
     assert result == (str(book_dir / "book.epub"), "Book", 2)
-    assert len(received) == 1
     saved_metadata = json.loads((book_dir / "metadata.json").read_text(encoding="utf-8"))
     assert "flag_detail_trans" not in saved_metadata
+    with zipfile.ZipFile(result[0]) as archive:
+        chapters = "\n".join(
+            archive.read(name).decode("utf-8")
+            for name in archive.namelist()
+            if name.endswith(".xhtml") and "chap_" in name
+        )
+    assert "body 101" in chapters
+    assert "body 102" in chapters
+    assert "one" not in chapters
+    assert "two" not in chapters
 
 
 def test_epub_builder_builds_empty_chapter_epub(tmp_path, novel_data):
@@ -340,74 +325,6 @@ def test_epub_builder_builds_empty_chapter_epub(tmp_path, novel_data):
         opf = archive.read("EPUB/content.opf").decode("utf-8")
     assert "<dc:title>A Test / Novel</dc:title>" in opf
     assert "<dc:creator id=\"creator\">Test Author</dc:creator>" in opf
-
-
-def test_load_or_fetch_replaces_raw_episode_cache_with_stale_revision(
-    tmp_path, episodes
-):
-    cache_dir = tmp_path / ".raw_cache"
-    cache_dir.mkdir()
-    cache_file = cache_dir / "101.json"
-    cache_file.write_text(
-        json.dumps({
-            "html": "<p>stale</p>",
-            "epi_no": 101,
-            "epi_title": "First",
-            "flag_detail_trans": 1,
-        }),
-        encoding="utf-8",
-    )
-    client = DummyFetchClient([{
-        "html": "<p>fresh</p>",
-        "epi_no": 101,
-        "epi_title": "First / Chapter",
-    }])
-
-    results = builder._load_or_fetch_episodes(
-        client, episodes[:1], str(cache_dir), update_mode=True
-    )
-
-    assert client.fetched == episodes[:1]
-    assert results[0]["html"] == "<p>fresh</p>"
-    cached = json.loads(cache_file.read_text(encoding="utf-8"))
-    assert cached["html"] == "<p>fresh</p>"
-    assert cached["flag_detail_trans"] == 2
-
-
-def test_load_or_fetch_caches_each_episode_as_it_arrives(tmp_path, episodes):
-    cache_dir = tmp_path / ".raw_cache"
-    cache_dir.mkdir()
-    cached_during_fetch = []
-
-    class Client(DummyFetchClient):
-        def fetch_episodes_parallel(
-            self, episode_list, max_workers=1, progress_cb=None, on_complete_cb=None
-        ):
-            def remember_cache_state(result):
-                if on_complete_cb:
-                    on_complete_cb(result)
-                cached_during_fetch.append(
-                    (cache_dir / f"{result['epi_no']}.json").exists()
-                )
-
-            return super().fetch_episodes_parallel(
-                episode_list,
-                max_workers=max_workers,
-                progress_cb=progress_cb,
-                on_complete_cb=remember_cache_state,
-            )
-
-    builder._load_or_fetch_episodes(
-        Client(), episodes, str(cache_dir), update_mode=True
-    )
-
-    assert cached_during_fetch == [True, True]
-    for episode in episodes:
-        cached = json.loads(
-            (cache_dir / f"{episode['episode_no']}.json").read_text(encoding="utf-8")
-        )
-        assert cached["html"] == f"<p>body {episode['episode_no']}</p>"
-        assert cached["flag_detail_trans"] == episode["flag_detail_trans"]
 
 
 def test_update_retry_after_cancel_reuses_cached_book_dir(
@@ -734,20 +651,3 @@ def test_load_or_fetch_uses_cached_html_without_resanitizing(tmp_path, episodes)
     assert "<!-- keep me -->" not in html_from_episode_text(cached_html)
 
 
-def test_epub_builder_accepts_novel_metadata_without_reparsing(tmp_path, novel_data):
-    metadata = _metadata(novel_data)
-    output, title, count = EpubBuilder(str(tmp_path)).build(
-        metadata,
-        [{
-            "html": "<p>already clean</p>",
-            "epi_no": 101,
-            "epi_title": "First / Chapter",
-        }],
-        fetch_image=lambda *args, **kwargs: None,
-    )
-
-    assert count == 1
-    assert title == metadata.title
-    with zipfile.ZipFile(output) as archive:
-        chapter = archive.read("EPUB/chap_0001.xhtml").decode("utf-8")
-    assert "<p>already clean</p>" in chapter

@@ -26,8 +26,8 @@ only. Tokens do not appear in source, logs, fixtures, issues, or agent docs.
 - `CODING_STANDARDS.md`: review; write comments; change CLI/GUI options; touch
   auth, cache, book identity, cancel, recap, image hosts, or API contracts;
   add tests; first `git add` of `docs/` or `tests/`
-- `tests/conftest.py`, `tests/test_api.py`: add tests. `FakeSession` lives in
-  `test_api.py` and `test_epub_security.py`, not conftest.
+- `CODING_STANDARDS.md` Tests: test command, FakeSession home, what a test asserts.
+- `tests/conftest.py`, `tests/test_api.py`: add tests.
 - `docs/novelpia-api.openapi.yaml`: change request or response shapes in
   `src/api.py`
 - `docs/sample_api_responses/`: compare against captured payloads
@@ -37,7 +37,6 @@ only. Tokens do not appear in source, logs, fixtures, issues, or agent docs.
 
 ## Tests
 
-`pip install -r requirements-dev.txt`, then `python -m pytest`.
 `PermissionError` from `pytest-of-*`, `.pytest-tmp`, or `--basetemp` is a
 Windows sandbox failure (`WinError 5` on `tmp_path`), not a project test
 failure.

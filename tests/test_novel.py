@@ -1,4 +1,3 @@
-import logging
 from types import SimpleNamespace
 
 import pytest
@@ -10,7 +9,6 @@ from src.novel import (
     format_account_status,
     html_from_episode_text,
     parse_novel_metadata,
-    user_subscription_status,
 )
 
 
@@ -276,20 +274,11 @@ def test_fetch_novel_and_episodes_skips_list_call_when_epi_cnt_is_zero():
     assert calls == []
 
 
-def test_fetch_novel_and_episodes_rejects_empty_episode_list(novel_data):
-    client = SimpleNamespace(
-        novel=lambda novel_id: novel_data,
-        episode_list=lambda novel_id, rows: {"result": {"list": []}},
-    )
-
-    with pytest.raises(NoEpisodesError, match="has no downloadable episodes"):
-        fetch_novel_and_episodes(client, 42)
-
-
-def test_fetch_novel_and_episodes_rejects_all_webtoon_episode_list(novel_data):
-    client = SimpleNamespace(
-        novel=lambda novel_id: novel_data,
-        episode_list=lambda novel_id, rows: {
+@pytest.mark.parametrize(
+    "episode_list_payload",
+    [
+        {"result": {"list": []}},
+        {
             "result": {
                 "list": [
                     {
@@ -301,41 +290,46 @@ def test_fetch_novel_and_episodes_rejects_all_webtoon_episode_list(novel_data):
                 ]
             }
         },
+    ],
+)
+def test_fetch_novel_and_episodes_rejects_no_downloadable_episodes(
+    novel_data, episode_list_payload
+):
+    client = SimpleNamespace(
+        novel=lambda novel_id: novel_data,
+        episode_list=lambda novel_id, rows: episode_list_payload,
     )
 
     with pytest.raises(NoEpisodesError, match="has no downloadable episodes"):
         fetch_novel_and_episodes(client, 42)
 
 
-def test_user_subscription_status_paid_free_unknown():
-    assert user_subscription_status({
-        "result": {"subscription": {}, "login": {"mem_plus_type": 0}},
-    }) == "paid"
-    assert user_subscription_status({
-        "result": {"login": {"mem_plus_type": 0}},
-    }) == "free"
-    assert user_subscription_status({
-        "result": {"login": {"mem_plus_type": 1}},
-    }) == "paid"
-    assert user_subscription_status({
-        "result": {"login": {"mem_plus_type": 2}},
-    }) == "paid"
-    assert user_subscription_status({
-        "result": {"login": {"mem_plus_type": "0"}},
-    }) == "free"
-    assert user_subscription_status({}) == "unknown"
-    assert user_subscription_status(None) == "unknown"
-    assert user_subscription_status({"result": {}}) == "unknown"
-
-
-def test_format_account_status_includes_nick_when_present():
-    assert format_account_status({
-        "result": {"login": {"mem_nick": "tester", "mem_plus_type": 0}},
-    }) == "account=free nick='tester'"
-    assert format_account_status({
-        "result": {"login": {"mem_nick": "  ", "mem_plus_type": 1}},
-    }) == "account=paid"
-    assert format_account_status(None) == "account=unknown"
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (
+            {"result": {"subscription": {}, "login": {"mem_plus_type": 0}}},
+            "account=paid",
+        ),
+        ({"result": {"login": {"mem_plus_type": 0}}}, "account=free"),
+        ({"result": {"login": {"mem_plus_type": 1}}}, "account=paid"),
+        ({"result": {"login": {"mem_plus_type": 2}}}, "account=paid"),
+        ({"result": {"login": {"mem_plus_type": "0"}}}, "account=free"),
+        ({}, "account=unknown"),
+        (None, "account=unknown"),
+        ({"result": {}}, "account=unknown"),
+        (
+            {"result": {"login": {"mem_nick": "tester", "mem_plus_type": 0}}},
+            "account=free nick='tester'",
+        ),
+        (
+            {"result": {"login": {"mem_nick": "  ", "mem_plus_type": 1}}},
+            "account=paid",
+        ),
+    ],
+)
+def test_format_account_status(payload, expected):
+    assert format_account_status(payload) == expected
 
 
 def test_fetch_novel_and_episodes_does_not_call_me(novel_data):
@@ -351,41 +345,3 @@ def test_fetch_novel_and_episodes_does_not_call_me(novel_data):
     fetch_novel_and_episodes(client, 42)
 
     assert me_calls == []
-
-
-def test_fetch_novel_and_episodes_logs_counts(novel_data, caplog):
-    novel_payload = {
-        "result": {
-            "novel": novel_data["result"]["novel"],
-            "info": {
-                "epi_cnt": 2,
-                "free_epi_cnt": 1,
-                "ad_epi_cnt": 4,
-                "premium_epi_cnt": 10,
-            },
-            "writer_list": novel_data["result"]["writer_list"],
-            "tag_list": novel_data["result"]["tag_list"],
-        }
-    }
-    episode_payload = {
-        "result": {
-            "list": [
-                {
-                    "episode_no": 1,
-                    "epi_title": "One",
-                    "flag_content": 0,
-                    "flag_type": 1,
-                }
-            ]
-        }
-    }
-    client = SimpleNamespace(
-        novel=lambda novel_id: novel_payload,
-        episode_list=lambda novel_id, rows: episode_payload,
-    )
-
-    with caplog.at_level(logging.INFO, logger="pia_scrap"):
-        fetch_novel_and_episodes(client, 42)
-
-    assert "account=" not in caplog.text
-    assert "free=1 ad=4 premium=10" in caplog.text

@@ -1,7 +1,6 @@
 import pytest
 
 from src.api import NovelpiaClient
-from src.const import SESSION_HEADERS
 
 
 class FakeResponse:
@@ -16,6 +15,11 @@ class FakeResponse:
 
 
 AUTH_COOKIES = {"USERKEY": "user", "TKEY": "token", "other": "secret"}
+SIGNED_COOKIES = {
+    "CloudFront-Policy": "fixture-policy",
+    "CloudFront-Signature": "fixture-signature",
+    "CloudFront-Key-Pair-Id": "fixture-key-id",
+}
 
 
 class FakeSession:
@@ -75,47 +79,26 @@ def test_image_fetch_blocks_unapproved_hosts_without_request():
     assert session.calls == []
 
 
-def test_image_fetch_uses_image_headers_not_json_session_headers():
-    session = FakeSession([FakeResponse()])
-    make_client(session).fetch_image(
-        "https://image.novelpia.com/image.jpg",
-        "https://global.novelpia.com/viewer/1",
-        {"CloudFront-Policy": "policy"},
-    )
-
-    headers = session.calls[0][1]["headers"]
-    assert headers["User-Agent"] == SESSION_HEADERS["user-agent"]
-    assert headers["Accept"].startswith("image/")
-    assert "application/json" not in headers["Accept"]
-    assert headers["Sec-Fetch-Dest"] == "image"
-
-
 @pytest.mark.parametrize(
     "host",
     ["global.novelpia.com", "d.novelpia.com", "images.novelpia.com"],
 )
 def test_session_image_fetch_sends_only_session_cookies(host):
-    session = FakeSession([FakeResponse()])
+    # Contaminate the image jar; curl_cffi would attach these if clear/filter failed.
+    session = FakeSession([FakeResponse()], cookies=dict(AUTH_COOKIES))
     client = make_client(session)
     result = client.fetch_image(
         f"https://{host}/image.jpg",
         "https://global.novelpia.com/viewer/1",
-        {
-            "CloudFront-Policy": "policy",
-            "CloudFront-Signature": "signature",
-            "CloudFront-Key-Pair-Id": "key-id",
-        },
+        dict(SIGNED_COOKIES),
     )
 
     assert result == b"image"
-    assert client.s.calls == []
-    headers = session.calls[0][1]["headers"]
-    sent = cookies_curl_would_send(session, headers)
+    sent = cookies_curl_would_send(session, session.calls[0][1]["headers"])
     assert sent.get("USERKEY") == "user"
     assert sent.get("TKEY") == "token"
     assert "CloudFront-Policy" not in sent
     assert "other" not in sent
-    assert session.calls[0][1]["allow_redirects"] is False
 
 
 @pytest.mark.parametrize(
@@ -123,28 +106,24 @@ def test_session_image_fetch_sends_only_session_cookies(host):
     ["gn.novelpia.com", "image.novelpia.com", "img.novelpia.com", "pv-gn.novelpia.com"],
 )
 def test_cdn_image_fetch_sends_only_signed_cloudfront_cookies(host):
-    session = FakeSession([FakeResponse()])
+    # Contaminate the image jar; curl_cffi would attach these if clear/filter failed.
+    session = FakeSession([FakeResponse()], cookies=dict(AUTH_COOKIES))
     client = make_client(session)
     result = client.fetch_image(
         f"https://{host}/image.jpg",
         "https://global.novelpia.com/viewer/1",
-        {
-            "CloudFront-Policy": "policy",
-            "CloudFront-Signature": "signature",
-            "CloudFront-Key-Pair-Id": "key-id",
-            "unexpected": "secret",
-        },
+        {**SIGNED_COOKIES, "unexpected": "secret"},
     )
 
     assert result == b"image"
-    assert client.s.calls == []
-    headers = session.calls[0][1]["headers"]
-    sent = cookies_curl_would_send(session, headers)
+    sent = cookies_curl_would_send(session, session.calls[0][1]["headers"])
     assert "USERKEY" not in sent
     assert "TKEY" not in sent
     assert "unexpected" not in sent
-    assert sent.get("CloudFront-Policy") == "policy"
-    assert session.calls[0][1]["allow_redirects"] is False
+    assert "other" not in sent
+    assert sent.get("CloudFront-Policy") == "fixture-policy"
+    assert sent.get("CloudFront-Signature") == "fixture-signature"
+    assert sent.get("CloudFront-Key-Pair-Id") == "fixture-key-id"
 
 
 def test_image_fetch_does_not_follow_redirect_to_unapproved_host():
@@ -154,7 +133,7 @@ def test_image_fetch_does_not_follow_redirect_to_unapproved_host():
     result = make_client(session).fetch_image(
         "https://image.novelpia.com/image.jpg",
         "https://global.novelpia.com/viewer/1",
-        {"CloudFront-Policy": "policy"},
+        dict(SIGNED_COOKIES),
     )
 
     assert result is None

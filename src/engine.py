@@ -17,7 +17,6 @@ from src.novel import NovelSkipError, format_account_status
 
 logger = logging.getLogger("pia_scrap")
 
-# Outcome statuses that are not clean success / up-to-date skip.
 _PROBLEM_STATUSES = frozenset({"failed", "404", "not_exist", "no_data"})
 
 
@@ -181,7 +180,7 @@ class ScraperEngine:
         if self.threads < 1:
             raise ValueError("Threads must be at least 1.")
 
-        # Skip if an entry point already set the level.
+        # Leave the logger level unchanged when main.py or gui.py already configured it.
         pia_logger = logging.getLogger("pia_scrap")
         if pia_logger.level == logging.NOTSET:
             pia_logger.setLevel(logging.DEBUG if self.debug_mode else logging.INFO)
@@ -375,7 +374,7 @@ class ScraperEngine:
                             entry = {"novel_id": novel_id, "status": "skipped", "title": title}
                             skipped_count += 1
                         else:
-                            success_msg = f"Wrote EPUB: {out_file} | Title: {title} | Chapters: {count}\n"
+                            success_msg = f"Wrote EPUB: {out_file} | Title: {title} | Chapters: {count}"
                             self.update_status(f"[success] {success_msg}")
                             entry = {
                                 "novel_id": novel_id,
