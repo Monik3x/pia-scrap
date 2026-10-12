@@ -8,9 +8,10 @@ info:
     Novelpia Global API consumed by pia-scrap. It is not published or endorsed by
     Novelpia and may change without notice.
 
-    Evidence comes from the project's client implementation and seven successful,
-    redacted capture sets for novel metadata, episode lists, episode tickets, and
-    episode content. Operations or fields without captures are deliberately loose.
+    Evidence comes from the project's client implementation, seven redacted capture
+    sets, and an authenticated pass on 2026-09-26. On that pass, novel, episode-list
+    item, and ticket field names matched the saved captures. Operations or fields
+    without captures are deliberately loose.
 
     Use only with an account and content you are authorized to access. The ticket
     and content operations do not grant access: the service still enforces account,
@@ -24,7 +25,7 @@ info:
   contact:
     name: pia-scrap project
   x-spec-status: observed-unofficial
-  x-evidence-date: 2026-08-10
+  x-evidence-date: 2026-09-26
 servers:
   - url: https://api-global.novelpia.com
     description: Novelpia Global API
@@ -39,9 +40,10 @@ paths:
       operationId: login
       summary: Create an authenticated session
       description: |
-        Returns a `LOGINAT` value and may set `TKEY` and `USERKEY` cookies.
-        This response has not been captured in the supplied samples; only the
-        fields consumed by pia-scrap are specified.
+        HTTP 201. `result` contains `LOGINAT` only.
+        Sets `TKEY` and `last_login=email` (the word `email`, not the account address).
+        Does not set `USERKEY`. A wrong password is HTTP 500 `MEMBER_ERROR` `0001`
+        with errmsg `Member information not found.`
       security: []
       requestBody:
         required: true
@@ -50,26 +52,30 @@ paths:
             schema:
               $ref: '#/components/schemas/LoginRequest'
       responses:
-        '200':
-          description: Login response.
+        '201':
+          description: Login session created.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/LoginResponse'
-        '400': {$ref: '#/components/responses/ErrorResponse'}
-        '401': {$ref: '#/components/responses/ErrorResponse'}
+        '500':
+          description: Rejected credentials (`MEMBER_ERROR` `0001`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
         '429': {$ref: '#/components/responses/RateLimited'}
   /v1/login/refresh:
     get:
       tags: [Authentication]
       operationId: refreshLogin
       summary: Refresh the login token
-      description: The exact cookie requirements and error envelope need captures.
+      description: |
+        HTTP 200 when the `TKEY` cookie is present. `Login-At` is not required.
+        `result.LOGINAT` is the refreshed token. Without `TKEY`, HTTP 500
+        `AUTH_ERROR` `0003` with errmsg `The token is invalid.`
       security:
-        - loginAt: []
-          userKey: []
-          tKey: []
-          lastLogin: []
+        - tKey: []
       responses:
         '200':
           description: Refreshed login token.
@@ -77,8 +83,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/LoginResponse'
-        '401': {$ref: '#/components/responses/ErrorResponse'}
-        '403': {$ref: '#/components/responses/ErrorResponse'}
+        '500':
+          description: Missing or invalid TKEY (`AUTH_ERROR` `0003`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
         '429': {$ref: '#/components/responses/RateLimited'}
   /v1/login/me:
     get:
@@ -86,11 +96,12 @@ paths:
       operationId: getCurrentMember
       summary: Get the current authenticated member
       description: |
-        Requires the `Login-At` header. A browser address-bar GET without it
-        returns HTTP 404 `code` `9999` / `NOT FOUND`.
-        Live `result` includes `login` and may omit `subscription`; paid is
-        `mem_plus_type != 0` (`0` free; observed `1` and `2` paid). pia-scrap
-        also uses this call as an authentication check.
+        Requires the `Login-At` header. Header case does not matter.
+        Without it, HTTP 500 `AUTH_ERROR` `0001` with errmsg `You must be logged in.`
+        A free session's `result` is `login`, `asset`, and `temp_asset`.
+        The `subscription` key is absent. `login.mem_plus_type` is an integer
+        (`0` free; paid is any other value, previously observed as `1` and `2`).
+        `call_url` is an optional query. pia-scrap uses this call as an authentication check.
       security:
         - loginAt: []
           userKey: []
@@ -103,9 +114,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MeResultEnvelope'
-        '401': {$ref: '#/components/responses/ErrorResponse'}
-        '403': {$ref: '#/components/responses/ErrorResponse'}
-        '404': {$ref: '#/components/responses/ErrorResponse'}
+        '500':
+          description: Missing Login-At (`AUTH_ERROR` `0001`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
         '429': {$ref: '#/components/responses/RateLimited'}
   /v1/novel:
     get:
@@ -114,8 +128,10 @@ paths:
       summary: Get novel metadata
       description: |
         `result.info` is the catalog chapter mix when `Login-At` is omitted.
-        A plus session that sends `Login-At` may set `free_epi_cnt=epi_cnt` and
-        zero `ad_epi_cnt`/`premium_epi_cnt`. pia-scrap omits `Login-At` here.
+        A free session that sends `Login-At` keeps that mix and adds `member_novel`
+        and `member_like`. A plus session that sends `Login-At` may set
+        `free_epi_cnt=epi_cnt` and zero `ad_epi_cnt`/`premium_epi_cnt`.
+        pia-scrap omits `Login-At` here.
       security:
         - userKey: []
           tKey: []
@@ -145,7 +161,10 @@ paths:
       summary: List public novels
       description: |
         pia-scrap requests only `rows`, then reads `result.list[].novel` and filters
-        `novel_locale=ko`. The complete query and response contracts are not captured.
+        `novel_locale=ko`. The default list mixes locales. Korean K-Premium rows use
+        `novel_locale=ko` with `common_content_type` `2`. Indie rows use
+        `common_content_type` `1`. The count field is `result.total_cnt`.
+        Each item is `novel`, `tag_list`, and `writer_list`.
       security:
         - loginAt: []
           userKey: []
@@ -171,7 +190,10 @@ paths:
       tags: [Novels]
       operationId: listLikedNovels
       summary: List novels in the authenticated member's library
-      description: The query is observed in code; the response is specified only to the fields the project consumes.
+      description: |
+        Liked novels only. Reading history is `GET /v1/novel/mybook`, which pia-scrap
+        does not call. The count field is `result.total_cnt`. An empty library is
+        `list: []` and `total_cnt: 0`.
       security:
         - loginAt: []
           userKey: []
@@ -224,9 +246,13 @@ paths:
           in: query
           required: true
           description: |
-            Maximum requested rows. The service rejects `rows` < 2 with HTTP 500
-            `COMMON_ERROR` `0001` (`rows must not be less than 2`). pia-scrap
-            sends `max(2, metadata episode count)` so one-chapter novels still list.
+            Maximum requested rows. `rows` < 2 is HTTP 500 `COMMON_ERROR` `0001`
+            with errmsg `Invalid request.` The constraint text
+            `rows must not be less than 2` is in `result.data[].constraints`.
+            pia-scrap sends `max(2, metadata episode count)`. That single response
+            returns the full list, with `result.total_count` equal to the row count.
+            `page` is optional. The site defaults to `page=1` and `rows=20`.
+            A one-chapter novel listed with `rows=2` returns `list` of length 1.
           schema: {type: integer, minimum: 2}
         - name: sort
           in: query
@@ -248,10 +274,15 @@ paths:
       operationId: getEpisodeTicket
       summary: Request an episode access ticket
       description: |
-        Returns episode/novel metadata, an opaque short-lived `_t` value, and signed
-        CloudFront cookie values used for authorized episode images. Receiving a
-        ticket depends on the caller's legitimate access rights. Live ad-gated and
-        premium denials use the HTTP 500 `TicketAccessDeniedEnvelope`, not 403.
+        Returns episode/novel metadata, an opaque `_t`, and signed CloudFront cookie
+        values used for authorized episode images. With `USERKEY` present, `_t` is a
+        long string (observed near 300 characters). Without `USERKEY`, `_t` is empty
+        even when `TKEY` is sent. Receiving a ticket depends on the caller's
+        legitimate access rights. A free account still receives HTTP 500
+        `TicketAccessDeniedEnvelope` for ad-gated (`0008`) and premium (`0009`)
+        episodes. `episode_no` and `novel_no` are integers under `result.data.data`.
+        `result.data.novel_no` was present on the observed `0008` and absent on the
+        observed `0009`.
       security:
         - loginAt: []
           userKey: []
@@ -290,11 +321,12 @@ paths:
       summary: Exchange an episode ticket for chapter content
       description: |
         The response can split chapter HTML across `epi_content`, `epi_content2`,
-        `epi_content3`, and further numerically suffixed fields. Consumers should
-        concatenate the base field first and suffixed fields in numeric order.
-        `writer_comment` is separate and is not chapter content. The observed
-        client does not send `login-at`; a 403 means `_t` expired and the caller
-        remints via `/v1/novel/episode`.
+        `epi_content3`, and further numerically suffixed fields. A free chapter and
+        an indie chapter on 2026-09-26 used exactly those three segments plus
+        `writer_comment`. Consumers should concatenate the base field first and
+        suffixed fields in numeric order. `writer_comment` is separate and is not
+        chapter content. The observed client does not send `login-at`; a 403 means
+        `_t` expired and the caller remints via `/v1/novel/episode`.
       security:
         - userKey: []
           tKey: []
@@ -326,7 +358,9 @@ components:
       type: apiKey
       in: cookie
       name: USERKEY
-      description: Client/session identifier. pia-scrap generates one when absent.
+      description: |
+        Client-generated id. Login does not set it. pia-scrap generates one when
+        absent. Episode tickets return an empty `_t` when this cookie is missing.
     tKey:
       type: apiKey
       in: cookie
@@ -336,7 +370,9 @@ components:
       type: apiKey
       in: cookie
       name: last_login
-      description: The observed client sends the constant value `basic` on non-login requests.
+      description: |
+        Login sets this cookie to the word `email`. pia-scrap sends `basic` on
+        later requests. Tickets still succeed with that value.
   parameters:
     NovelNumber:
       name: novel_no
@@ -433,6 +469,15 @@ components:
                 subscription:
                   type: object
                   nullable: true
+                  description: Absent on a free session checked 2026-09-26.
+                  additionalProperties: true
+                asset:
+                  type: object
+                  description: Balance and view counters for the caller. Present on a free session.
+                  additionalProperties: true
+                temp_asset:
+                  type: object
+                  description: Temporary coin and ticket lists. Present on a free session.
                   additionalProperties: true
                 login:
                   type: object
@@ -484,6 +529,17 @@ components:
         tag_list:
           type: array
           items: {$ref: '#/components/schemas/Tag'}
+        member_novel:
+          type: object
+          description: Caller reading progress. Present when `Login-At` is sent.
+          additionalProperties: true
+        member_like:
+          type: object
+          description: Caller like row. Present when `Login-At` is sent. Empty when the novel is not liked.
+          additionalProperties: true
+        notice:
+          type: object
+          additionalProperties: true
       additionalProperties: true
     NovelEpisodeCounts:
       type: object
@@ -627,7 +683,7 @@ components:
                     properties:
                       novel: {$ref: '#/components/schemas/Novel'}
                     additionalProperties: true
-                total_count: {type: integer, minimum: 0}
+                total_cnt: {type: integer, minimum: 0, description: Novel list and like list. Episode list uses `total_count`.}
               additionalProperties: true
     EpisodeListResponse:
       allOf:
@@ -651,7 +707,9 @@ components:
         episode_no: {type: integer, minimum: 1}
         novel_no: {type: integer, minimum: 1}
         epi_num: {type: integer, minimum: 0}
-        epi_title: {type: string}
+        epi_title:
+          type: string
+          description: Heading. Some translated rows append a body preview on the following lines.
         epi_img: {type: string}
         episode_info: {type: [string, 'null']}
         open_dt: {$ref: '#/components/schemas/NullableServiceDateTime'}
