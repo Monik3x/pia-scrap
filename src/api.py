@@ -343,7 +343,9 @@ class NovelpiaClient:
                 )
 
                 if resp.status_code in (301, 302, 303, 307, 308):
-                    redirect_url = urljoin(url, resp.headers.get("Location", ""))
+                    redirect_url = normalize_url(
+                        urljoin(url, resp.headers.get("Location", ""))
+                    )
                     if not is_approved_image_url(redirect_url):
                         last_error = f"Blocked redirect to unapproved host: {redirect_url}"
                         break

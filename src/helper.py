@@ -7,8 +7,14 @@ import tempfile
 import unicodedata
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional, Tuple
-from urllib.parse import parse_qs, urljoin, urlparse
-from src.const import APPROVED_IMAGE_HOSTS, BASE_URL, CONFIG_PATH, IMG_BASE_HTTPS
+from urllib.parse import parse_qs, urljoin, urlparse, urlunparse
+from src.const import (
+    APPROVED_IMAGE_HOSTS,
+    BASE_URL,
+    CONFIG_PATH,
+    IMAGE_HOST_ALIASES,
+    IMG_BASE_HTTPS,
+)
 
 logger = logging.getLogger("pia_scrap")
 
@@ -79,10 +85,15 @@ def normalize_url(u: str) -> str:
         return u
     u = u.strip()
     if u.startswith("//"):
-        return IMG_BASE_HTTPS + u
-    if not urlparse(u).scheme:
-        return urljoin(f"{BASE_URL}/", u)
-    return u
+        u = IMG_BASE_HTTPS + u
+    elif not urlparse(u).scheme:
+        u = urljoin(f"{BASE_URL}/", u)
+    parsed = urlparse(u)
+    host = (parsed.hostname or "").lower()
+    alias = IMAGE_HOST_ALIASES.get(host)
+    if not alias:
+        return u
+    return urlunparse(parsed._replace(netloc=alias))
 
 def is_approved_image_url(url: str) -> bool:
     """Accept only HTTPS image URLs on Novelpia's known first-party hosts."""

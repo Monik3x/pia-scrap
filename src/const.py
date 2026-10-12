@@ -5,12 +5,16 @@ API_BASE = "https://api-global.novelpia.com"
 IMG_BASE_HTTPS = "https:"
 IMAGE_HOST_COOKIE_POLICY = {
     "global.novelpia.com": "session",
-    "d.novelpia.com": "session",
     "images.novelpia.com": "session",
     "gn.novelpia.com": "signed",
-    "img.novelpia.com": "signed",
     "image.novelpia.com": "signed",
     "pv-gn.novelpia.com": "signed",
+}
+# d.novelpia.com has no DNS. img.novelpia.com CloudFront-403s imagebox
+# files that image.novelpia.com serves without cookies.
+IMAGE_HOST_ALIASES = {
+    "d.novelpia.com": "image.novelpia.com",
+    "img.novelpia.com": "image.novelpia.com",
 }
 APPROVED_IMAGE_HOSTS = frozenset(IMAGE_HOST_COOKIE_POLICY)
 SIGNED_IMAGE_COOKIE_NAMES = frozenset({

@@ -81,7 +81,7 @@ def test_image_fetch_blocks_unapproved_hosts_without_request():
 
 @pytest.mark.parametrize(
     "host",
-    ["global.novelpia.com", "d.novelpia.com", "images.novelpia.com"],
+    ["global.novelpia.com", "images.novelpia.com"],
 )
 def test_session_image_fetch_sends_only_session_cookies(host):
     # Contaminate the image jar; curl_cffi would attach these if clear/filter failed.
@@ -103,7 +103,7 @@ def test_session_image_fetch_sends_only_session_cookies(host):
 
 @pytest.mark.parametrize(
     "host",
-    ["gn.novelpia.com", "image.novelpia.com", "img.novelpia.com", "pv-gn.novelpia.com"],
+    ["gn.novelpia.com", "image.novelpia.com", "pv-gn.novelpia.com"],
 )
 def test_cdn_image_fetch_sends_only_signed_cloudfront_cookies(host):
     # Contaminate the image jar; curl_cffi would attach these if clear/filter failed.
@@ -124,6 +124,27 @@ def test_cdn_image_fetch_sends_only_signed_cloudfront_cookies(host):
     assert sent.get("CloudFront-Policy") == "fixture-policy"
     assert sent.get("CloudFront-Signature") == "fixture-signature"
     assert sent.get("CloudFront-Key-Pair-Id") == "fixture-key-id"
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["d.novelpia.com", "img.novelpia.com"],
+)
+def test_fetch_image_requests_canonical_host_for_aliases(source):
+    session = FakeSession([FakeResponse()], cookies=dict(AUTH_COOKIES))
+    client = make_client(session)
+    result = client.fetch_image(
+        f"https://{source}/imagebox/ab/abc.png",
+        "https://global.novelpia.com/viewer/1",
+        dict(SIGNED_COOKIES),
+    )
+
+    assert result == b"image"
+    assert session.calls[0][0] == "https://image.novelpia.com/imagebox/ab/abc.png"
+    sent = cookies_curl_would_send(session, session.calls[0][1]["headers"])
+    assert sent.get("CloudFront-Policy") == "fixture-policy"
+    assert "USERKEY" not in sent
+    assert "TKEY" not in sent
 
 
 def test_image_fetch_does_not_follow_redirect_to_unapproved_host():

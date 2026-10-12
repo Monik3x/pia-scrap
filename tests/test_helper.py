@@ -44,17 +44,42 @@ def test_normalize_url():
     assert helper.normalize_url("") == ""
 
 
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            "https://d.novelpia.com/imagebox/5b/5bc9ca9dc34ddcf2d254463768eaf4c7_954868.png",
+            "https://image.novelpia.com/imagebox/5b/5bc9ca9dc34ddcf2d254463768eaf4c7_954868.png",
+        ),
+        (
+            "https://img.novelpia.com/imagebox/8b/8b770edd1622d3f72b4f65ec23c80a41_689960.png",
+            "https://image.novelpia.com/imagebox/8b/8b770edd1622d3f72b4f65ec23c80a41_689960.png",
+        ),
+        (
+            "//d.novelpia.com/imagebox/c2/c262c4f4ddcfa6efca21e33d83c8d9cc_1723139.png",
+            "https://image.novelpia.com/imagebox/c2/c262c4f4ddcfa6efca21e33d83c8d9cc_1723139.png",
+        ),
+    ],
+)
+def test_normalize_url_rewrites_dead_image_hosts(source, expected):
+    assert helper.normalize_url(source) == expected
+
+
 def test_image_url_allowlist_is_exact_and_https_only():
     assert helper.is_approved_image_url("https://image.novelpia.com/a.jpg")
     assert helper.is_approved_image_url("https://global.novelpia.com/a.jpg")
     assert helper.is_approved_image_url(
-        "https://d.novelpia.com/imagebox/80/804a58cc60faed71c0e370df07d17073_499547.png"
+        helper.normalize_url(
+            "https://d.novelpia.com/imagebox/80/804a58cc60faed71c0e370df07d17073_499547.png"
+        )
     )
     assert helper.is_approved_image_url(
         "https://images.novelpia.com/imagebox/cover/11576a6b7d10e5a37598da89dfa7b3b6_369320_ori.wimg"
     )
     assert helper.is_approved_image_url("https://gn.novelpia.com/a.jpg")
-    assert helper.is_approved_image_url("https://img.novelpia.com/a.jpg")
+    assert helper.is_approved_image_url(
+        helper.normalize_url("https://img.novelpia.com/a.jpg")
+    )
     assert not helper.is_approved_image_url("http://image.novelpia.com/a.jpg")
     assert not helper.is_approved_image_url("https://image.novelpia.com.evil.test/a.jpg")
     assert not helper.is_approved_image_url("https://evil.test/a.jpg")
