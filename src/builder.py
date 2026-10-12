@@ -15,7 +15,13 @@ from src.helper import (
     write_json_atomic,
     write_text_atomic,
 )
-from src.novel import NovelMetadata, fetch_novel_and_episodes, html_from_episode_text, parse_novel_metadata
+from src.novel import (
+    NovelMetadata,
+    episode_heading,
+    fetch_novel_and_episodes,
+    html_from_episode_text,
+    parse_novel_metadata,
+)
 
 logger = logging.getLogger("pia_scrap")
 
@@ -85,6 +91,8 @@ def _chapter_revisions_match(chapters_path: str, episodes: List[Dict]) -> bool:
             return False
         if stored[EPISODE_REVISION_FIELD] != episode[EPISODE_REVISION_FIELD]:
             return False
+        if stored.get("title") != episode.get("epi_title"):
+            return False
 
     return True
 
@@ -134,6 +142,9 @@ def _cached_episode_result(cache_file: str, epi_no: int, episode: Dict) -> Optio
         return None
     cached_result = dict(cached_data)
     cached_result.pop("signed_key", None)
+    heading = episode.get("epi_title")
+    if isinstance(heading, str) and heading.strip():
+        cached_result["epi_title"] = episode_heading(heading)
     return cached_result
 
 

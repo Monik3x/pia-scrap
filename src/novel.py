@@ -101,6 +101,17 @@ def _info_count(info: Any, key: str) -> int:
         return 0
 
 
+def episode_heading(raw: str) -> str:
+    """First line of an episode-list title.
+    Some translated rows append/leak a body preview on the following lines.
+    """
+    for line in raw.splitlines():
+        heading = line.strip()
+        if heading:
+            return heading
+    return ""
+
+
 def _is_webtoon_episode(episode: Any) -> bool:
     """Return whether an episode-list entry is a webtoon without prose content."""
     if not isinstance(episode, dict):
@@ -276,5 +287,9 @@ def fetch_novel_and_episodes(
 
     if not ep_list:
         raise NoEpisodesError(f"Novel {novel_id} has no downloadable episodes.")
+
+    for episode in ep_list:
+        if isinstance(episode, dict) and isinstance(episode.get("epi_title"), str):
+            episode["epi_title"] = episode_heading(episode["epi_title"])
 
     return data_novel, ep_list, metadata

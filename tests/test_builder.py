@@ -311,6 +311,80 @@ def test_build_epub_rebuilds_when_chapter_revisions_do_not_match(
     assert "two" not in chapters
 
 
+def test_build_epub_update_replaces_preview_titles_from_cache(tmp_path, novel_data):
+    preview_title = (
+        "# Dating My Celebrity Sister at the Karaoke (8)\n\n"
+        '"Wow, this is really amazing."\n'
+    )
+    heading = "# Dating My Celebrity Sister at the Karaoke (8)"
+    episode = {
+        "episode_no": 827609,
+        "epi_num": 1971,
+        "epi_title": preview_title,
+        "flag_detail_trans": 1,
+        "flag_content": 0,
+        "flag_type": 1,
+    }
+
+    class Client(DummyFetchClient):
+        def novel(self, novel_id):
+            return novel_data
+
+        def episode_list(self, novel_id, rows):
+            return {"result": {"list": [episode]}}
+
+    book_dir = tmp_path / "a-test-novel"
+    book_dir.mkdir()
+    (book_dir / ".novel_id").write_text("42", encoding="ascii")
+    (book_dir / "metadata.json").write_text(
+        json.dumps({"chapter": 1, "novel_id": 42}),
+        encoding="utf-8",
+    )
+    (book_dir / "chapters.jsonl").write_text(
+        json.dumps({
+            "idx": 1,
+            "episode_no": 827609,
+            "title": preview_title,
+            "url": f"{BASE_URL}/viewer/827609",
+            "flag_detail_trans": 1,
+        }) + "\n",
+        encoding="utf-8",
+    )
+    cache_dir = book_dir / ".raw_cache"
+    cache_dir.mkdir()
+    (cache_dir / "827609.json").write_text(
+        json.dumps({
+            "html": "<p>full chapter</p>",
+            "epi_no": 827609,
+            "epi_title": preview_title,
+            "flag_detail_trans": 1,
+        }),
+        encoding="utf-8",
+    )
+    with zipfile.ZipFile(book_dir / "a-test-novel.epub", "w") as archive:
+        archive.writestr("chap_0001.xhtml", "stale heading")
+
+    client = Client()
+    output, _title, count = builder.build_epub(
+        client, 42, str(tmp_path), update_mode=True
+    )
+
+    assert client.fetched == []
+    assert count == 1
+    with zipfile.ZipFile(output) as archive:
+        chapters = [
+            archive.read(name).decode("utf-8")
+            for name in archive.namelist()
+            if name.endswith(".xhtml") and "chap_" in name
+        ]
+    assert len(chapters) == 1
+    assert heading in chapters[0]
+    assert "Wow" not in chapters[0]
+    assert "full chapter" in chapters[0]
+    saved = json.loads((book_dir / "chapters.jsonl").read_text(encoding="utf-8"))
+    assert saved["title"] == heading
+
+
 def test_epub_builder_builds_empty_chapter_epub(tmp_path, novel_data):
     output, title, count = EpubBuilder(str(tmp_path)).build(
         _metadata(novel_data), [], fetch_image=lambda *args, **kwargs: None

@@ -205,6 +205,30 @@ def test_fetch_novel_and_episodes_keeps_single_chapter_novels():
     assert episodes == [episode]
 
 
+def test_fetch_novel_and_episodes_keeps_heading_when_title_includes_body_preview(novel_data):
+    episode = {
+        "episode_no": 827609,
+        "novel_no": 5633,
+        "epi_num": 1971,
+        "epi_title": (
+            "# Dating My Celebrity Sister at the Karaoke (8)\n\n"
+            '"Wow, this is really amazing."\n\n'
+            "The karaoke room we entered was on a completely different level.\n"
+        ),
+        "flag_content": 0,
+        "flag_type": 1,
+        "flag_translate": 1,
+    }
+    client = SimpleNamespace(
+        novel=lambda novel_id: novel_data,
+        episode_list=lambda novel_id, rows: {"result": {"list": [episode]}},
+    )
+
+    _, episodes, _ = fetch_novel_and_episodes(client, 5633)
+
+    assert episodes[0]["epi_title"] == "# Dating My Celebrity Sister at the Karaoke (8)"
+
+
 @pytest.mark.parametrize("payload", [None, {}, {"result": {}}, {"result": {"novel": []}}])
 def test_parse_novel_metadata_rejects_invalid_payload(payload):
     with pytest.raises(NoMetadataError, match="no metadata"):
