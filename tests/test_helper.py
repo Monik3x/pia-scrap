@@ -180,6 +180,42 @@ def test_book_base_keeps_owned_folder_and_disambiguates_collisions(tmp_path):
     assert helper.book_base(str(renamed), "New Title", 42, book_index=index) == "old-title"
 
 
+@pytest.mark.parametrize("claim", ["marker", "metadata"])
+def test_retire_owned_novel_releases_the_id_and_keeps_the_files(tmp_path, claim):
+    kept = tmp_path / "your-generic-tower-climber-novel"
+    kept.mkdir()
+    metadata = {
+        "novel_id": 4786,
+        "title": "Your Generic Tower Climber Novel",
+        "url": "https://global.novelpia.com/novel/4786",
+    }
+    (kept / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    (kept / "your-generic-tower-climber-novel.epub").write_bytes(b"epub-bytes")
+    if claim == "marker":
+        (kept / ".novel_id").write_text("4786", encoding="ascii")
+    extra = tmp_path / "also-4786"
+    extra.mkdir()
+    (extra / ".novel_id").write_text("4786", encoding="ascii")
+    index = helper.build_book_directory_index(str(tmp_path))
+
+    released = helper.retire_owned_novel(str(tmp_path), 4786)
+
+    assert set(released) == {str(kept), str(extra)}
+    assert not (kept / ".novel_id").exists()
+    assert not (extra / ".novel_id").exists()
+    assert (kept / "your-generic-tower-climber-novel.epub").read_bytes() == b"epub-bytes"
+    assert json.loads((kept / "metadata.json").read_text(encoding="utf-8")) == metadata
+    retired = json.loads((kept / ".retired").read_text(encoding="utf-8"))
+    assert retired["novel_id"] == 4786
+    assert retired["title"] == "Your Generic Tower Climber Novel"
+    assert retired["retired_at"]
+    assert helper.book_directory_novel_id(str(kept)) is None
+    assert helper.local_library_novel_ids(str(tmp_path)) == []
+    assert helper.book_base(
+        str(tmp_path), "Your Generic Tower Climber Novel", 4786, book_index=index
+    ) == "your-generic-tower-climber-novel-4786"
+
+
 def test_ensure_book_identity_writes_marker_and_rejects_conflicts(tmp_path):
     paths = helper.book_output_paths(str(tmp_path), "A Test Novel", 42)
     helper.ensure_book_identity(paths)

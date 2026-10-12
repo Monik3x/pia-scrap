@@ -672,8 +672,11 @@ def _response_requires_auth(response) -> bool:
 
 
 def _server_error_messages(response) -> Optional[Dict[str, Any]]:
-    """Parse a Novelpia 500 body into messages and result fields, if present."""
-    if getattr(response, "status_code", None) != 500:
+    """Parse a Novelpia 404 or 500 JSON body into messages and result fields.
+
+    A missing novel uses either status with the same NOVEL_ERROR body.
+    """
+    if getattr(response, "status_code", None) not in (404, 500):
         return None
 
     try:

@@ -6,6 +6,7 @@ import logging
 import tempfile
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import parse_qs, urljoin, urlparse, urlunparse
 from src.const import (
@@ -180,6 +181,10 @@ def book_directory_novel_id(book_dir: str) -> Optional[int]:
             return None
         return novel_id if novel_id > 0 else None
 
+    # Metadata keeps the old novel_id as history. This file means the folder is not a live claim.
+    if os.path.isfile(os.path.join(book_dir, ".retired")):
+        return None
+
     marker_path = os.path.join(book_dir, ".novel_id")
     try:
         with open(marker_path, "r", encoding="ascii") as marker_file:
@@ -324,6 +329,50 @@ def local_library_novel_ids(out_dir: str) -> List[int]:
             ids.append(novel_id)
     return unique_in_order(ids)
 
+
+def retire_owned_novel(out_dir: str, novel_id: int) -> List[str]:
+    """Release every local folder that claims novel_id. Keep the book files."""
+    novel_id = int(novel_id)
+    try:
+        entries = list(_iter_book_dir_entries(out_dir))
+    except OSError:
+        return []
+
+    released: List[str] = []
+    for entry in entries:
+        if book_directory_novel_id(entry.path) != novel_id:
+            continue
+        write_json_atomic(
+            os.path.join(entry.path, ".retired"),
+            _retired_record(entry.path, novel_id),
+        )
+        try:
+            os.remove(os.path.join(entry.path, ".novel_id"))
+        except FileNotFoundError:
+            pass
+        released.append(entry.path)
+    return released
+
+
+def _retired_record(book_dir: str, novel_id: int) -> Dict[str, Any]:
+    title = os.path.basename(os.path.normpath(book_dir)) or str(novel_id)
+    meta_path = os.path.join(book_dir, "metadata.json")
+    try:
+        with open(meta_path, "r", encoding="utf-8") as meta_file:
+            metadata = json.load(meta_file)
+        if isinstance(metadata, dict):
+            stored = metadata.get("title")
+            if isinstance(stored, str) and stored.strip():
+                title = stored.strip()
+    except (OSError, UnicodeError, TypeError, ValueError, json.JSONDecodeError):
+        pass
+    return {
+        "novel_id": novel_id,
+        "title": title,
+        "retired_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
 def book_base(
     out_dir: str,
     title: str,
@@ -343,7 +392,9 @@ def book_base(
         existing_base = _find_existing_book_base(out_dir, novel_id, base)
     else:
         existing_base = book_index.get(novel_id)
-        if existing_base and not os.path.isdir(os.path.join(out_dir, existing_base)):
+        if existing_base and book_directory_novel_id(
+            os.path.join(out_dir, existing_base)
+        ) != novel_id:
             existing_base = None
     if existing_base:
         return existing_base

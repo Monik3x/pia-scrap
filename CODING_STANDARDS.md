@@ -45,7 +45,7 @@ Sanitize remote titles and episode names before they become path components.
 
 ## Book identity
 
-A local book is identified by novel ID. Write `.novel_id` before cache or EPUB work so a cancelled run still owns the folder. Title changes keep the existing folder. Reuse a folder only when it already belongs to that novel ID.
+A local book is identified by novel ID. Write `.novel_id` before cache or EPUB work so a cancelled run still owns the folder. Title changes keep the existing folder. Reuse a folder only when it already belongs to that novel ID. When the novel endpoint says the novel does not exist (HTTP 404 or 500 with that body) and a local folder already claims that ID, write `.retired`, delete `.novel_id`, and leave the files. `book_directory_novel_id` ignores a retired folder, including a queue index entry that still names it. A later download of that ID starts a new folder. A 404 from another request, a missing episode list, or missing metadata does not release the ID.
 
 ## Images
 

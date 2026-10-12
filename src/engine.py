@@ -3,13 +3,14 @@ import os
 import threading
 from datetime import datetime, timezone
 from typing import List, Optional, Callable, Dict, Any
-from src.api import DownloadCancelled, NovelpiaClient
+from src.api import DownloadCancelled, NovelpiaClient, NovelUnavailableError
 from src.builder import build_epub, build_txt
 from src.helper import (
     build_book_directory_index,
     load_config,
     local_library_novel_ids,
     parse_range,
+    retire_owned_novel,
     save_config,
     write_text_atomic,
 )
@@ -407,6 +408,14 @@ class ScraperEngine:
                     status_code = getattr(response, "status_code", None)
                     if isinstance(e, NovelSkipError):
                         warn_msg = _skip_warning(e)
+                        if isinstance(e, NovelUnavailableError) and retire_owned_novel(
+                            self.out_dir, novel_id
+                        ):
+                            book_index.pop(int(novel_id), None)
+                            warn_msg = (
+                                f"Novel {novel_id} does not exist. "
+                                "Kept the local copy and released the ID."
+                            )
                         self.update_status(f"[warn] {warn_msg}")
                         entry = {
                             "novel_id": novel_id,

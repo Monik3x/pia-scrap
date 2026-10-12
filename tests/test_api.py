@@ -164,15 +164,16 @@ def test_episode_ticket_unknown_500_still_retries(monkeypatch):
     assert len(waits) == 3
 
 
-def test_novel_maps_server_error_to_unavailable_novel(monkeypatch):
+@pytest.mark.parametrize("status_code", [404, 500])
+def test_novel_maps_server_error_to_unavailable_novel(monkeypatch, status_code):
     client = make_api_client()
     monkeypatch.setattr(
         api,
         "request_with_retries",
         lambda *args, **kwargs: FakeResponse(
-            500,
+            status_code,
             {
-                "statusCode": 500,
+                "statusCode": status_code,
                 "errmsg": "The novel does not exist.",
                 "errmsgs": ["The novel does not exist."],
                 "code": "0001",

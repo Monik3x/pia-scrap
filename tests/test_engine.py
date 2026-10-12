@@ -1,3 +1,4 @@
+import json
 import logging
 import threading
 from types import SimpleNamespace
@@ -531,6 +532,98 @@ def test_format_run_recap_cancelled_empty_does_not_claim_clean_run():
     )
     assert "Download queue was interrupted." in recap
     assert "No failures or warnings." not in recap
+
+
+def _owned_book(tmp_path, novel_id=4786):
+    book = tmp_path / "tower-climber"
+    book.mkdir()
+    (book / ".novel_id").write_text(str(novel_id), encoding="ascii")
+    (book / "metadata.json").write_text(
+        json.dumps({
+            "novel_id": novel_id,
+            "title": "Your Generic Tower Climber Novel",
+            "url": f"https://global.novelpia.com/novel/{novel_id}",
+        }),
+        encoding="utf-8",
+    )
+    (book / "tower-climber.epub").write_bytes(b"epub-bytes")
+    return book
+
+
+def test_download_queue_unavailable_novel_keeps_local_copy_and_releases_id(
+    monkeypatch, tmp_path
+):
+    book = _owned_book(tmp_path)
+    monkeypatch.setattr(
+        engine,
+        "build_epub",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            NovelUnavailableError("Novel 4786 is unassigned or unavailable.")
+        ),
+    )
+    scraper = engine.ScraperEngine(out_dir=str(tmp_path))
+    scraper.client = SimpleNamespace(sleep_cooperative=lambda seconds: None)
+
+    result = scraper.run_download_queue([4786])
+
+    entry = result["results"][0]
+    assert entry["status"] == "not_exist"
+    assert entry["error"] == (
+        "Novel 4786 does not exist. Kept the local copy and released the ID."
+    )
+    assert "Kept the local copy and released the ID." in engine.format_run_recap(result)
+    assert not (book / ".novel_id").exists()
+    assert (book / "tower-climber.epub").read_bytes() == b"epub-bytes"
+    assert json.loads((book / "metadata.json").read_text(encoding="utf-8"))["novel_id"] == 4786
+    assert json.loads((book / ".retired").read_text(encoding="utf-8"))["novel_id"] == 4786
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        NoEpisodesError("Novel 4786 has no downloadable episodes."),
+        NoMetadataError("Novel 4786 returned no metadata."),
+    ],
+)
+def test_download_queue_other_skips_keep_the_local_id_claim(
+    monkeypatch, tmp_path, error
+):
+    book = _owned_book(tmp_path)
+    monkeypatch.setattr(
+        engine,
+        "build_epub",
+        lambda *args, **kwargs: (_ for _ in ()).throw(error),
+    )
+    scraper = engine.ScraperEngine(out_dir=str(tmp_path))
+    scraper.client = SimpleNamespace(sleep_cooperative=lambda seconds: None)
+
+    scraper.run_download_queue([4786])
+
+    assert (book / ".novel_id").read_text(encoding="ascii") == "4786"
+    assert not (book / ".retired").exists()
+
+
+def test_download_queue_404_keeps_the_local_id_claim(monkeypatch, tmp_path):
+    book = _owned_book(tmp_path, novel_id=9)
+
+    class HttpError(Exception):
+        def __init__(self):
+            super().__init__("not found")
+            self.response = SimpleNamespace(status_code=404)
+
+    monkeypatch.setattr(
+        engine,
+        "build_epub",
+        lambda *args, **kwargs: (_ for _ in ()).throw(HttpError()),
+    )
+    scraper = engine.ScraperEngine(out_dir=str(tmp_path))
+    scraper.client = SimpleNamespace(sleep_cooperative=lambda seconds: None)
+
+    result = scraper.run_download_queue([9])
+
+    assert result["results"][0]["status"] == "404"
+    assert (book / ".novel_id").read_text(encoding="ascii") == "9"
+    assert not (book / ".retired").exists()
 
 
 def test_download_queue_404_error_text_appears_in_recap(monkeypatch, tmp_path):
