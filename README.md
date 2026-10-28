@@ -25,6 +25,10 @@ pip install -r requirements.txt
 python gui.py
 ```
 
+Double-click a novel in the Local Library to open its EPUB in your default reader.
+Hover over a novel to preview its saved cover, description, and reading label.
+Previews use local files; covers require a downloaded EPUB.
+
 <img width="1270" height="959" alt="image" src="https://github.com/user-attachments/assets/4e802f78-0a73-49f6-8e01-35a9ef30fc5c" />
 
 ---
@@ -94,6 +98,8 @@ python main.py recent --update
 python main.py local
 ```
 
+The Local Library tab can also store a reading label and a chapter number for each folder. The label is one name in `reading_labels.json` in the output directory. The chapter number is `calibre_bookmarks.txt` inside the book folder. If the EPUB contains Calibre's in-book bookmark (`META-INF/calibre_bookmarks.txt`), the library uses that reading position when it is newer than the folder bookmark. The book does not have to be in a Calibre library. Checked books are remembered in `output/.embed_progress.json` so the next launch does not open an unchanged EPUB. Publication status stays in `metadata.json`.
+
 ---
 
 ## Output
@@ -106,6 +112,9 @@ output/<title>/<episode-title>.txt          # if --txt is used
 output/<title>/.raw_cache/                  # episode JSON if --update is used
 output/<title>/.raw_cache/image_index.json  # URL to content-hash map for EPUB image reuse
 output/<title>/chapters.jsonl               # chapter URLs and per-episode revision markers
+output/<title>/calibre_bookmarks.txt        # chapter number and viewer id, from the library tab
+output/reading_labels.json                  # one reading label per folder name
+output/.embed_progress.json                 # checked in-book positions; not the reading place
 output/last_run_report.txt                  # end-of-run failure/warning recap (overwritten each queue)
 ```
 

@@ -43,6 +43,10 @@ EPUB update mode keeps the stored chapter set when `max_chapters` is lower than 
 
 Sanitize remote titles and episode names before they become path components.
 
+## Reading list
+
+Reading progress is `calibre_bookmarks.txt` in the book folder. `idx` is the chapter number on screen and the line hint in `chapters.jsonl`. `episode_no` is the marked viewer chapter, so an earlier insert can move `idx` without losing the place. The reading label is one string per folder name in `reading_labels.json` at the library root. `metadata.json` `status` stays the publication status. `build_metadata` leaves the sidecar and the label file alone. The library folder scan stays a directory listing. The library list is one table. Changing page refills that table and does not build a widget per book. Cached rows draw immediately. EPUB and chapter reads for the visible page run on the library worker. An empty chapter box does not remove the sidecar. Calibre's in-book bookmark, `META-INF/calibre_bookmarks.txt` inside the EPUB, may update the sidecar. The book does not have to be in a Calibre library. A newer in-book last-read position replaces the sidecar. A newer sidecar is left as it was set. Rewriting the EPUB keeps that bookmark member, and a failed copy still publishes the new EPUB. `.embed_progress.json` in the output directory remembers checked in-book positions so an unchanged EPUB is not opened again. It is not the reading position.
+
 ## Book identity
 
 A local book is identified by novel ID. Write `.novel_id` before cache or EPUB work so a cancelled run still owns the folder. Title changes keep the existing folder. Reuse a folder only when it already belongs to that novel ID. When the novel endpoint says the novel does not exist (HTTP 404 or 500 with that body) and a local folder already claims that ID, write `.retired`, delete `.novel_id`, and leave the files. `book_directory_novel_id` ignores a retired folder, including a queue index entry that still names it. A later download of that ID starts a new folder. A 404 from another request, a missing episode list, or missing metadata does not release the ID.

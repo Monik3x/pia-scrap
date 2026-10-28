@@ -3,19 +3,39 @@ import queue
 import logging
 import threading
 import traceback
+import subprocess
+import sys
 from typing import Dict, Any
 
 from dotenv import load_dotenv
 import customtkinter as ctk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
 from src.api import DownloadCancelled
 from src.engine import ScraperEngine, format_run_recap
-from src.helper import list_local_book_directories, load_config, load_local_book_info, local_library_novel_ids
+from src.helper import kebab, list_local_book_directories, load_config, load_local_book_info, local_library_novel_ids
 from src import const
+from src import reading_list
+from src.library_preview import find_book_epub, load_book_preview
 
 ctk.set_appearance_mode("System")
 ctk.set_default_color_theme("blue")
+
+
+def _compact_marker(idx, title):
+    text = (title or "").strip()
+    part = ""
+    if text.endswith(")") and "(" in text:
+        inner = text[text.rfind("(") + 1:-1].strip()
+        if inner.isdigit():
+            part = f" part{int(inner)}"
+    try:
+        number = int(idx)
+    except (TypeError, ValueError):
+        number = 0
+    if number > 0:
+        return f"c{number}{part}"
+    return text
 
 class QueueLogHandler(logging.Handler):
     def __init__(self, log_queue: queue.Queue):
@@ -77,18 +97,34 @@ class PiaScrapGUI(ctk.CTk):
         self.tab_download.grid_columnconfigure(1, weight=2, minsize=420)
         self.tab_download.grid_rowconfigure(0, weight=1)
         
-        self._create_left_panel()
-        self._create_right_panel()
-        self._create_library_panel()
-
         self.current_page = 0
         self.items_per_page = 50
         self.library_dirs = []
         self.filtered_dirs = []
+        self.label_filter = "All"
+        self._label_map = {}
+        self._labels_unreadable = False
+        self._page_rows = {}
+        self._library_generation = 0
+        self._library_row_cache = {}
+        self._library_cache_lock = threading.Lock()
+        self._library_jobs = queue.Queue()
+        self._search_after = None
+        self._preview_after = None
+        self._preview_row = None
+        self._preview_token = 0
+        self._preview_window = None
+
+        self._create_left_panel()
+        self._create_right_panel()
+        self._create_library_panel()
         
         self._load_saved_configurations()
         
         self.after(50, self.process_queue)
+        threading.Thread(
+            target=self._library_loader, name="library-loader", daemon=True
+        ).start()
 
     def _create_left_panel(self):
         left_frame = ctk.CTkFrame(self.tab_download, corner_radius=10)
@@ -220,44 +256,137 @@ class PiaScrapGUI(ctk.CTk):
 
     def _create_library_panel(self):
         self.tab_library.grid_columnconfigure(0, weight=1)
-        self.tab_library.grid_rowconfigure(1, weight=1)
-        
+        self.tab_library.grid_rowconfigure(2, weight=1)
+        secondary = dict(
+            fg_color=("#E2E5E9", "#34383E"),
+            hover_color=("#D1D6DC", "#454B53"),
+            text_color=("#28313B", "#E3E6EB"),
+            text_color_disabled=("#9299A2", "#858C96"),
+        )
+        blue = dict(
+            fg_color="#2B6CB0",
+            hover_color="#2C5282",
+            text_color="#FFFFFF",
+            text_color_disabled=("#A2AFBE", "#9AA9BA"),
+        )
+        menu_colors = dict(
+            fg_color=secondary["fg_color"],
+            button_color=("#D1D6DC", "#454B53"),
+            button_hover_color=("#C3CAD2", "#555D67"),
+            text_color=secondary["text_color"],
+            dropdown_fg_color=("#F2F3F5", "#2B2F35"),
+            dropdown_hover_color=("#DDE2E8", "#454B53"),
+            dropdown_text_color=secondary["text_color"],
+        )
+
         top_bar = ctk.CTkFrame(self.tab_library, fg_color="transparent")
-        top_bar.grid(row=0, column=0, padx=15, pady=10, sticky="ew")
+        top_bar.grid(row=0, column=0, padx=15, pady=(10, 6), sticky="ew")
         top_bar.grid_columnconfigure(0, weight=1)
-        top_bar.grid_columnconfigure(1, weight=1)
-        top_bar.grid_columnconfigure(2, weight=0)
-        top_bar.grid_columnconfigure(3, weight=0)
-        
-        lib_title = ctk.CTkLabel(top_bar, text="Local Library", font=ctk.CTkFont(size=18, weight="bold"))
-        lib_title.grid(row=0, column=0, sticky="w")
 
         self.search_var = ctk.StringVar()
         self.search_var.trace_add("write", lambda *args: self.on_search_changed())
-        self.search_entry = ctk.CTkEntry(top_bar, placeholder_text="🔍 Search local novels...", textvariable=self.search_var)
-        self.search_entry.grid(row=0, column=1, padx=(10, 20), sticky="ew")
-        
-        self.update_all_btn = ctk.CTkButton(top_bar, text="Check & Update All", width=150, fg_color="#2B6CB0", hover_color="#2C5282", command=self.update_all_library)
-        self.update_all_btn.grid(row=0, column=2, padx=(0, 10), sticky="e")
-        
-        refresh_btn = ctk.CTkButton(top_bar, text="Scan & Refresh Folder", width=160, fg_color="#4A5568", hover_color="#2D3748", command=self.full_scan_library)
-        refresh_btn.grid(row=0, column=3, sticky="e")
-        
-        self.library_scroll = ctk.CTkScrollableFrame(self.tab_library, label_text="Detected Local Novels")
-        self.library_scroll.grid(row=1, column=0, padx=15, pady=(0, 10), sticky="nsew")
+        self.search_entry = ctk.CTkEntry(top_bar, placeholder_text="Search local novels...", textvariable=self.search_var)
+        self.search_entry.grid(row=0, column=0, padx=(0, 12), sticky="ew")
+
+        self.label_filter_var = ctk.StringVar(value="All")
+        self.label_filter_menu = ctk.CTkOptionMenu(
+            top_bar, values=["All", "Unlabeled", *reading_list.BUILTIN_LABELS],
+            variable=self.label_filter_var, command=self.on_label_filter_changed,
+            width=140, **menu_colors,
+        )
+        self.label_filter_menu.grid(row=0, column=1, padx=(0, 8))
+
+        refresh_btn = ctk.CTkButton(top_bar, text="\u21bb", width=34, font=ctk.CTkFont(size=22), command=self.full_scan_library, **secondary)
+        refresh_btn.grid(row=0, column=2, sticky="e")
+
+        action_bar = ctk.CTkFrame(self.tab_library, fg_color="transparent")
+        action_bar.grid(row=1, column=0, padx=15, pady=(0, 10), sticky="ew")
+        self.move_var = ctk.StringVar(value="Move to")
+        self.move_menu = ctk.CTkOptionMenu(
+            action_bar,
+            values=["Move to", "Clear label", *reading_list.BUILTIN_LABELS],
+            variable=self.move_var,
+            command=self._move_selected,
+            width=150, **menu_colors,
+        )
+        self.move_menu.pack(side="left")
+
+        chapter_label = ctk.CTkLabel(action_bar, text="Chapter")
+        chapter_label.pack(side="left", padx=(16, 6))
+        self.chapter_entry = ctk.CTkEntry(action_bar, width=72)
+        self.chapter_entry.pack(side="left")
+        self.chapter_entry.bind("<Return>", self._set_selected_chapter_event)
+        set_btn = ctk.CTkButton(action_bar, text="Set", width=52, command=self.set_selected_chapter, **secondary)
+        set_btn.pack(side="left", padx=(8, 0))
+        update_actions = ctk.CTkFrame(action_bar, fg_color="transparent")
+        update_actions.pack(side="right", padx=(16, 0))
+        self.library_update_btn = ctk.CTkButton(
+            update_actions,
+            text="Update selected",
+            width=120,
+            state="disabled",
+            command=self.update_selected_library,
+            **secondary,
+        )
+        self.library_update_btn.pack(side="left", padx=(0, 8))
+        self.update_all_btn = ctk.CTkButton(
+            update_actions, text="Update all", width=100,
+            command=self.update_all_library, **blue,
+        )
+        self.update_all_btn.pack(side="left")
+
+        self.library_table = ctk.CTkFrame(self.tab_library, fg_color="transparent")
+        self.library_table.grid(row=2, column=0, padx=15, pady=(0, 8), sticky="nsew")
+        self.library_table.grid_columnconfigure(0, weight=1)
+        self.library_table.grid_rowconfigure(0, weight=1)
+
+        self._style_library_tree()
+        self.library_tree = ttk.Treeview(
+            self.library_table,
+            columns=("series", "progress", "latest", "status"),
+            show="headings",
+            selectmode="extended",
+            style="Library.Treeview",
+        )
+        self.library_tree.heading("series", text="Series (0)", anchor="w")
+        self.library_tree.heading("progress", text="Progress", anchor="w")
+        self.library_tree.heading("latest", text="Latest", anchor="w")
+        self.library_tree.heading("status", text="Status", anchor="w")
+        self.library_tree.column("series", width=420, minwidth=180, stretch=True, anchor="w")
+        self.library_tree.column("progress", width=120, minwidth=80, stretch=False, anchor="w")
+        self.library_tree.column("latest", width=140, minwidth=80, stretch=False, anchor="w")
+        self.library_tree.column("status", width=100, minwidth=70, stretch=False, anchor="w")
+        self.library_tree.grid(row=0, column=0, sticky="nsew")
+        self.library_tree.bind("<<TreeviewSelect>>", self._on_library_select)
+        self.library_tree.bind("<Double-1>", self._open_library_epub)
+        self.library_tree.bind("<Motion>", self._on_library_hover)
+        for sequence in ("<Leave>", "<ButtonPress>", "<MouseWheel>", "<Unmap>"):
+            self.library_tree.bind(sequence, self._hide_library_preview, add="+")
+
+        self.library_scrollbar = ttk.Scrollbar(self.library_table, orient="vertical", command=self.library_tree.yview)
+        self.library_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.library_tree.configure(yscrollcommand=self.library_scrollbar.set)
+
+        self.library_empty = ctk.CTkLabel(
+            self.tab_library,
+            text="No downloaded novel folders matching criteria.",
+            font=ctk.CTkFont(slant="italic"),
+        )
+        self.library_empty.grid(row=2, column=0, padx=15, pady=(0, 8), sticky="n")
+        self.library_empty.grid_remove()
 
         self.pag_frame = ctk.CTkFrame(self.tab_library, fg_color="transparent")
-        self.pag_frame.grid(row=2, column=0, padx=15, pady=(0, 15), sticky="ew")
+        self.pag_frame.grid(row=3, column=0, padx=15, pady=(0, 15), sticky="ew")
         self.pag_frame.grid_columnconfigure((0, 2), weight=1)
         self.pag_frame.grid_columnconfigure(1, weight=0)
 
-        self.prev_btn = ctk.CTkButton(self.pag_frame, text="◀ Previous", width=100, command=self.prev_page)
+        self.prev_btn = ctk.CTkButton(self.pag_frame, text="◀ Previous", width=100, command=self.prev_page, **blue)
         self.prev_btn.grid(row=0, column=0, sticky="w")
 
         self.pag_label = ctk.CTkLabel(self.pag_frame, text="Page 1 of 1 (0 items)", font=ctk.CTkFont(size=13))
         self.pag_label.grid(row=0, column=1, padx=20)
 
-        self.next_btn = ctk.CTkButton(self.pag_frame, text="Next ▶", width=100, command=self.next_page)
+        self.next_btn = ctk.CTkButton(self.pag_frame, text="Next ▶", width=100, command=self.next_page, **blue)
         self.next_btn.grid(row=0, column=2, sticky="e")
 
     def browse_output_dir(self):
@@ -301,32 +430,151 @@ class PiaScrapGUI(ctk.CTk):
         """List book folders without reading metadata.json."""
         out_dir = self.output_entry.get().strip() or "output"
         self.library_dirs = list_local_book_directories(out_dir)
-        self.on_search_changed()
+        if self._search_after is not None:
+            self.after_cancel(self._search_after)
+            self._search_after = None
+        self._apply_library_query(reset_page=True)
 
     def on_search_changed(self):
-        query = self.search_var.get().strip().lower()
-        if not query:
-            self.filtered_dirs = self.library_dirs
+        if self._search_after is not None:
+            self.after_cancel(self._search_after)
+        self._search_after = self.after(200, self._search_library)
+
+    def _search_library(self):
+        self._search_after = None
+        self._apply_library_query(reset_page=True)
+
+    def on_label_filter_changed(self, value):
+        if value == self.label_filter:
+            return
+        self.label_filter = value
+        self._apply_library_query(reset_page=True)
+
+    def _labels_for_view(self, out_dir):
+        try:
+            labels = reading_list.read_labels(out_dir)
+        except reading_list.LabelsUnreadable:
+            if not self._labels_unreadable:
+                self.append_to_log(
+                    "[GUI-WARN] reading_labels.json could not be read. Labels stay hidden until that file is fixed."
+                )
+            self._labels_unreadable = True
+            return {}
+        self._labels_unreadable = False
+        return labels
+
+    def _filter_values(self, labels):
+        custom = []
+        for value in labels.values():
+            if value in reading_list.BUILTIN_LABELS or value in custom:
+                continue
+            if value in ("All", "Unlabeled"):
+                continue
+            custom.append(value)
+        custom.sort(key=str.casefold)
+        return ["All", "Unlabeled", *reading_list.BUILTIN_LABELS, *custom]
+
+    def _sync_label_filter(self, labels):
+        values = self._filter_values(labels)
+        self.label_filter_menu.configure(values=values)
+        move_values = ["Move to", "Clear label", *reading_list.BUILTIN_LABELS]
+        for extra in labels.values():
+            if extra not in move_values and extra not in ("All", "Unlabeled"):
+                move_values.append(extra)
+        self.move_menu.configure(values=move_values)
+        if self.move_var.get() not in move_values:
+            self.move_var.set("Move to")
+        if self.label_filter not in values:
+            self.label_filter = "All"
+        self.label_filter_var.set(self.label_filter)
+
+    def _style_library_tree(self):
+        style = ttk.Style()
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+        dark = ctk.get_appearance_mode() == "Dark"
+        if dark:
+            bg, fg, head_bg, head_fg, sel = (
+                "#272B30", "#E0E3E8", "#30353B", "#AEB7C2", "#2B6CB0",
+            )
         else:
-            self.filtered_dirs = [d for d in self.library_dirs if query in d.lower()]
-        
-        self.current_page = 0
+            bg, fg, head_bg, head_fg, sel = (
+                "#f4f7fb", "#1c2430", "#d5e0ec", "#334155", "#c5d8ee",
+            )
+        style.configure(
+            "Library.Treeview",
+            background=bg,
+            fieldbackground=bg,
+            foreground=fg,
+            rowheight=28,
+            borderwidth=0,
+            font=("Segoe UI", 11),
+        )
+        style.configure(
+            "Library.Treeview.Heading",
+            background=head_bg,
+            foreground=head_fg,
+            relief="flat",
+            font=("Segoe UI", 11),
+        )
+        style.map(
+            "Library.Treeview",
+            background=[("selected", sel)],
+            foreground=[("selected", "#ffffff" if dark else "#102033")],
+        )
+
+    def _show_library_table(self, visible):
+        if visible:
+            self.library_empty.grid_remove()
+            self.library_table.grid()
+        else:
+            self.library_table.grid_remove()
+            self.library_empty.grid()
+
+    def _apply_library_query(self, reset_page):
+        out_dir = self.output_entry.get().strip() or "output"
+        labels = self._labels_for_view(out_dir)
+        self._label_map = labels
+        self._sync_label_filter(labels)
+
+        names = self.library_dirs
+        query = self.search_var.get().strip().lower()
+        if query:
+            slug_query = kebab(query) if any(char.isalnum() for char in query) else ""
+            names = [
+                name for name in names
+                if query in name.lower() or (slug_query and slug_query in name.lower())
+            ]
+        chosen = self.label_filter
+        if chosen == "Unlabeled":
+            names = [name for name in names if name not in labels]
+        elif chosen != "All":
+            names = [name for name in names if labels.get(name) == chosen]
+        self.filtered_dirs = names
+        if reset_page:
+            self.current_page = 0
         self.display_current_page()
 
     def display_current_page(self):
-        """Load metadata.json only for the visible page."""
-        for widget in self.library_scroll.winfo_children():
-            widget.destroy()
-            
+        """Draw the visible page from memory. File reads run on the library worker."""
+        self._hide_library_preview()
+        self._library_generation += 1
+        generation = self._library_generation
+        self._page_rows = {}
+        children = self.library_tree.get_children()
+        if children:
+            self.library_tree.delete(*children)
         total_items = len(self.filtered_dirs)
+        self.library_tree.heading("series", text=f"Series ({total_items})")
         if total_items == 0:
-            empty_lbl = ctk.CTkLabel(self.library_scroll, text="No downloaded novel folders matching criteria.", font=ctk.CTkFont(style="italic"))
-            empty_lbl.pack(pady=20)
+            self._show_library_table(False)
             self.pag_label.configure(text="Page 1 of 1 (0 items)")
             self.prev_btn.configure(state="disabled")
             self.next_btn.configure(state="disabled")
+            self._on_library_select()
             return
 
+        self._show_library_table(True)
         total_pages = (total_items + self.items_per_page - 1) // self.items_per_page
         if self.current_page >= total_pages:
             self.current_page = max(0, total_pages - 1)
@@ -340,43 +588,170 @@ class PiaScrapGUI(ctk.CTk):
         self.next_btn.configure(state="normal" if self.current_page < total_pages - 1 else "disabled")
 
         out_dir = self.output_entry.get().strip() or "output"
+        try:
+            labels = reading_list.read_labels(out_dir)
+        except reading_list.LabelsUnreadable:
+            labels = self._label_map
+        else:
+            self._label_map = labels
 
-        for item in page_slice:
-            info = load_local_book_info(os.path.join(out_dir, item))
-            title = info.title
-            author = info.author
-            chapters = str(info.chapter_count) if info.has_metadata else "Unchecked"
-            status = info.status
-            novel_id = info.novel_id
-            
-            row = ctk.CTkFrame(self.library_scroll, corner_radius=6)
-            row.pack(fill="x", padx=5, pady=4)
-            
-            row.grid_columnconfigure(0, weight=4, uniform="lib_cols")
-            row.grid_columnconfigure(1, weight=2, uniform="lib_cols")
-            row.grid_columnconfigure(2, weight=2, uniform="lib_cols")
-            row.grid_columnconfigure(3, weight=2, uniform="lib_cols")
-            
-            info_lbl = ctk.CTkLabel(row, text=f"{title}\nBy: {author}", font=ctk.CTkFont(size=13, weight="bold"), anchor="w", justify="left")
-            info_lbl.grid(row=0, column=0, padx=15, pady=10, sticky="w")
-            
-            chap_lbl = ctk.CTkLabel(row, text=f"{chapters} Chapters", anchor="w")
-            chap_lbl.grid(row=0, column=1, padx=10, pady=10, sticky="w")
-            
-            color = "green" if status.lower() == "completed" else "orange" if status.lower() == "ongoing" else "gray"
-            status_lbl = ctk.CTkLabel(row, text=status, text_color=color, font=ctk.CTkFont(weight="bold"), anchor="w")
-            status_lbl.grid(row=0, column=2, padx=10, pady=10, sticky="w")
-            
-            update_btn = ctk.CTkButton(
-                row, 
-                text="Check & Update", 
-                width=110, 
-                fg_color="#2B6CB0", 
-                hover_color="#2C5282",
-                state="normal" if novel_id else "disabled",
-                command=lambda nid=novel_id: self.trigger_library_update(nid)
+        for index, item in enumerate(page_slice):
+            row_id = f"row-{index}"
+            cached = self._cached_library_row(out_dir, item)
+            if cached is None:
+                self._page_rows[row_id] = {
+                    "folder": item,
+                    "novel_id": None,
+                    "chapter_count": None,
+                    "has_metadata": False,
+                    "progress_idx": "",
+                }
+                values = (item, "", "", "")
+            else:
+                self._page_rows[row_id] = self._page_row_info(cached)
+                values = self._library_values(cached, labels)
+            self.library_tree.insert("", "end", iid=row_id, values=values)
+        self._on_library_select()
+        self._library_jobs.put((generation, out_dir, list(page_slice)))
+
+    def _library_cache_id(self, out_dir, folder):
+        return (os.path.abspath(out_dir), folder)
+
+    def _cached_library_row(self, out_dir, folder):
+        with self._library_cache_lock:
+            row = self._library_row_cache.get(self._library_cache_id(out_dir, folder))
+            if row is None:
+                return None
+            return dict(row)
+
+    def _page_row_info(self, row):
+        return {
+            "folder": row["folder"],
+            "novel_id": row["novel_id"],
+            "chapter_count": row["chapter_count"],
+            "has_metadata": row["has_metadata"],
+            "progress_idx": row["progress_idx"],
+        }
+
+    def _library_values(self, row, labels):
+        return (
+            row["title"],
+            row["progress"],
+            row["latest"],
+            row["status"],
+        )
+
+    def _library_file_key(self, book_dir):
+        def stamp(path):
+            try:
+                stat = os.stat(path)
+            except OSError:
+                return (0, 0)
+            return (stat.st_mtime_ns, stat.st_size)
+
+        epub_stamp = (0, 0)
+        try:
+            names = os.listdir(book_dir)
+        except OSError:
+            names = []
+        epubs = [
+            name for name in names
+            if name.lower().endswith(".epub") and not name.lower().endswith(".tmp")
+        ]
+        base = os.path.basename(os.path.normpath(book_dir)) + ".epub"
+        chosen = None
+        for name in epubs:
+            if name.casefold() == base.casefold():
+                chosen = name
+                break
+        if chosen is None and len(epubs) == 1:
+            chosen = epubs[0]
+        if chosen:
+            epub_stamp = stamp(os.path.join(book_dir, chosen))
+        return (
+            stamp(os.path.join(book_dir, ".novel_id")),
+            stamp(os.path.join(book_dir, ".retired")),
+            stamp(os.path.join(book_dir, "metadata.json")),
+            stamp(os.path.join(book_dir, "calibre_bookmarks.txt")),
+            stamp(os.path.join(book_dir, "chapters.jsonl")),
+            epub_stamp,
+        )
+
+    def _library_loader(self):
+        while True:
+            generation, out_dir, folders = self._library_jobs.get()
+            while True:
+                try:
+                    generation, out_dir, folders = self._library_jobs.get_nowait()
+                except queue.Empty:
+                    break
+            for folder in folders:
+                if generation != self._library_generation:
+                    break
+                row = self._load_library_row(out_dir, folder)
+                if row is not None and generation == self._library_generation:
+                    self.gui_queue.put(("library_row", (generation, row)))
+            if generation == self._library_generation:
+                try:
+                    reading_list.flush_embedded_cache()
+                except OSError as exc:
+                    self.logger.warning(f"Could not store the library progress cache: {exc}")
+
+    def _load_library_row(self, out_dir, folder):
+        book_dir = os.path.join(out_dir, folder)
+        try:
+            key = self._library_file_key(book_dir)
+            cache_id = self._library_cache_id(out_dir, folder)
+            with self._library_cache_lock:
+                cached = self._library_row_cache.get(cache_id)
+            if cached is not None and cached.get("key") == key:
+                return dict(cached)
+            reading_list.sync_embedded_progress(book_dir)
+            info = load_local_book_info(book_dir)
+            progress_text, progress_idx = self._progress_line(book_dir)
+            latest = self._latest_marker(book_dir, info)
+            key = self._library_file_key(book_dir)
+        except Exception as exc:
+            self.logger.warning(f"Could not read library row {folder}: {exc}")
+            return None
+        row = {
+            "folder": folder,
+            "novel_id": info.novel_id,
+            "chapter_count": info.chapter_count,
+            "has_metadata": info.has_metadata,
+            "progress_idx": progress_idx,
+            "key": key,
+            "title": info.title,
+            "progress": progress_text,
+            "latest": latest,
+            "status": info.status,
+        }
+        with self._library_cache_lock:
+            self._library_row_cache[cache_id] = row
+            return dict(row)
+
+    def _apply_library_row(self, generation, row):
+        if generation != self._library_generation:
+            return
+        folder = row["folder"]
+        selected = self.library_tree.selection()
+        touched = None
+        for row_id, info in self._page_rows.items():
+            if info.get("folder") != folder:
+                continue
+            info.update(self._page_row_info(row))
+            self.library_tree.item(
+                row_id, values=self._library_values(row, self._label_map)
             )
-            update_btn.grid(row=0, column=3, padx=15, pady=10, sticky="e")
+            touched = row_id
+            break
+        if touched is None or touched not in selected:
+            return
+        if len(selected) == 1:
+            self._on_library_select()
+            return
+        state = "normal" if self._selected_novel_ids() else "disabled"
+        self.library_update_btn.configure(state=state)
 
     def prev_page(self):
         if self.current_page > 0:
@@ -389,6 +764,211 @@ class PiaScrapGUI(ctk.CTk):
         if self.current_page < total_pages - 1:
             self.current_page += 1
             self.display_current_page()
+
+    def _progress_line(self, book_dir):
+        bookmark = reading_list.read_bookmark(book_dir)
+        if bookmark is None:
+            return "", ""
+        resolved = reading_list.resolve_bookmark(book_dir, bookmark)
+        if resolved is None:
+            return "", ""
+        idx, _episode_no, title = resolved
+        return _compact_marker(idx, title), str(idx)
+
+    def _latest_marker(self, book_dir, info):
+        last = reading_list.read_last_chapter(book_dir)
+        if last is not None:
+            return _compact_marker(last.get("idx"), last.get("title") or "")
+        if info.chapter_count:
+            return f"c{info.chapter_count}"
+        if info.has_metadata:
+            return ""
+        return "Unchecked"
+
+    def _hide_library_preview(self, _event=None):
+        self._preview_token += 1
+        self._preview_row = None
+        if self._preview_after is not None:
+            self.after_cancel(self._preview_after)
+            self._preview_after = None
+        if self._preview_window is not None:
+            self._preview_window.destroy()
+            self._preview_window = None
+
+    def _on_library_hover(self, event):
+        row = self.library_tree.identify_row(event.y)
+        if self.library_tree.identify_region(event.x, event.y) not in ("cell", "tree"):
+            row = None
+        if row == self._preview_row:
+            return
+        self._hide_library_preview()
+        if row not in self._page_rows:
+            return
+        self._preview_row = row
+        token = self._preview_token
+        book_dir = os.path.join(self.output_entry.get().strip() or "output",
+                                self._page_rows[row]["folder"])
+        self._preview_after = self.after(450, lambda: self._request_library_preview(token, book_dir))
+
+    def _request_library_preview(self, token, book_dir):
+        self._preview_after = None
+        def load():
+            preview = load_book_preview(book_dir)
+            self.gui_queue.put(("library_preview", (token, preview)))
+        threading.Thread(target=load, name="library-preview", daemon=True).start()
+
+    def _show_library_preview(self, token, preview):
+        if token != self._preview_token or self._preview_row not in self._page_rows:
+            return
+        info = self._page_rows[self._preview_row]
+        popup = ctk.CTkToplevel(self)
+        popup.withdraw()
+        popup.overrideredirect(True)
+        popup.attributes("-topmost", True)
+        self._preview_window = popup
+        card = ctk.CTkFrame(popup, corner_radius=8, border_width=1)
+        card.pack(fill="both", expand=True)
+        cover = preview["cover"]
+        image = ctk.CTkImage(light_image=cover, dark_image=cover, size=cover.size) if cover else None
+        ctk.CTkLabel(card, text="" if image else "No cover saved", image=image,
+                     width=140, height=210).grid(row=0, column=0, rowspan=4, padx=14, pady=14, sticky="n")
+        ctk.CTkLabel(card, text=preview["title"], font=ctk.CTkFont(size=16, weight="bold"),
+                     wraplength=330, justify="left").grid(row=0, column=1, padx=(0, 14), pady=(12, 0), sticky="w")
+        ctk.CTkLabel(card, text=preview["author"], wraplength=330, justify="left").grid(
+            row=1, column=1, padx=(0, 14), sticky="w")
+        label = self._label_map.get(info["folder"], "Unlabeled")
+        ctk.CTkLabel(card, text=f"Label: {label}", text_color=("#176345", "#75d9b1"),
+                     wraplength=330, justify="left").grid(row=2, column=1, padx=(0, 14), sticky="w")
+        description = preview["description"]
+        description = description[:700].rstrip() + "…" if len(description) > 700 else description
+        ctk.CTkLabel(card, text=description, wraplength=330, justify="left", anchor="nw").grid(
+            row=3, column=1, padx=(0, 14), pady=(6, 14), sticky="nw")
+        popup.update_idletasks()
+        width, height = popup.winfo_reqwidth(), popup.winfo_reqheight()
+        x, y = self.winfo_pointerxy()
+        x = x + 18 if x + 18 + width < self.winfo_screenwidth() else x - width - 18
+        y = min(y + 16, self.winfo_screenheight() - height - 8)
+        popup.geometry(f"+{max(0, x)}+{max(0, y)}")
+        popup.deiconify()
+
+    def _open_library_epub(self, event):
+        self._hide_library_preview()
+        if self.library_tree.identify_region(event.x, event.y) not in ("cell", "tree"):
+            return
+        row_id = self.library_tree.identify_row(event.y)
+        info = self._page_rows.get(row_id)
+        if not info:
+            return
+        out_dir = self.output_entry.get().strip() or "output"
+        book_dir = os.path.abspath(os.path.join(out_dir, info["folder"]))
+        threading.Thread(
+            target=self._launch_library_epub, args=(book_dir,), daemon=True,
+        ).start()
+        return "break"
+
+    def _launch_library_epub(self, book_dir):
+        try:
+            path = find_book_epub(book_dir)
+            if sys.platform == "win32":
+                os.startfile(path)
+            else:
+                subprocess.run(
+                    ["open" if sys.platform == "darwin" else "xdg-open", path],
+                    check=True, capture_output=True,
+                )
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.gui_queue.put(("library_open_error", f"Could not open EPUB:\n{exc}"))
+
+    def _on_library_select(self, _event=None):
+        selected = self.library_tree.selection()
+        self.chapter_entry.delete(0, "end")
+        if len(selected) == 1:
+            progress_idx = self._page_rows.get(selected[0], {}).get("progress_idx") or ""
+            if progress_idx:
+                self.chapter_entry.insert(0, progress_idx)
+        state = "normal" if self._selected_novel_ids() else "disabled"
+        self.library_update_btn.configure(state=state)
+
+    def _selected_novel_ids(self):
+        ids = []
+        for name in self.library_tree.selection():
+            novel_id = self._page_rows.get(name, {}).get("novel_id")
+            if novel_id:
+                ids.append(str(novel_id))
+        return ids
+
+    def _move_selected(self, value):
+        self.move_var.set("Move to")
+        if value in ("Move to", ""):
+            return
+        selected = list(self.library_tree.selection())
+        if not selected:
+            messagebox.showerror("Label", "Select a novel.")
+            return
+        label = "" if value == "Clear label" else value
+        if label in ("All", "Unlabeled"):
+            messagebox.showerror("Label", "All and Unlabeled are filters. Use another name.")
+            return
+        out_dir = self.output_entry.get().strip() or "output"
+        folders = [self._page_rows[name]["folder"] for name in selected if name in self._page_rows]
+        try:
+            for name in folders:
+                reading_list.set_label(out_dir, name, label)
+        except reading_list.LabelsUnreadable:
+            messagebox.showerror(
+                "Label",
+                "reading_labels.json could not be read, so it was left unchanged.",
+            )
+            return
+        self._apply_library_query(reset_page=False)
+
+    def _set_selected_chapter_event(self, _event):
+        self.set_selected_chapter()
+        return "break"
+
+    def set_selected_chapter(self):
+        selected = self.library_tree.selection()
+        if len(selected) != 1:
+            messagebox.showerror("Chapter", "Select one novel.")
+            return
+        info = self._page_rows.get(selected[0])
+        if not info:
+            return
+        self.set_row_chapter(
+            info["folder"],
+            self.chapter_entry,
+            info["chapter_count"],
+            info["has_metadata"],
+        )
+
+    def update_selected_library(self):
+        ids = self._selected_novel_ids()
+        if not ids:
+            messagebox.showerror("Missing Novel ID", "Select a novel that has an ID.")
+            return
+        self.trigger_library_update(", ".join(ids))
+
+    def set_row_chapter(self, folder_name, box, chapter_count, has_metadata):
+        out_dir = self.output_entry.get().strip() or "output"
+        book_dir = os.path.join(out_dir, folder_name)
+        raw = box.get().strip()
+        try:
+            idx = int(raw)
+        except ValueError:
+            messagebox.showerror("Chapter", "Enter a chapter number.")
+            return
+        if not has_metadata or chapter_count is None or idx < 1 or idx > chapter_count:
+            messagebox.showerror("Chapter", "That chapter is not in this book.")
+            return
+        line = reading_list.read_chapter_line(book_dir, idx)
+        episode_no = None if line is None else line.get("episode_no")
+        try:
+            episode_no = int(episode_no)
+        except (TypeError, ValueError):
+            messagebox.showerror("Chapter", "That chapter is not in this book.")
+            return
+        reading_list.write_bookmark(book_dir, idx, episode_no)
+        self.display_current_page()
 
     def trigger_library_update(self, novel_id):
         if not novel_id:
@@ -602,6 +1182,13 @@ class PiaScrapGUI(ctk.CTk):
                     self.on_download_complete(data)
                 elif task == "error":
                     self.on_download_failed(data)
+                elif task == "library_row":
+                    generation, row = data
+                    self._apply_library_row(generation, row)
+                elif task == "library_open_error":
+                    messagebox.showerror("Open EPUB", data)
+                elif task == "library_preview":
+                    self._show_library_preview(*data)
                 self.gui_queue.task_done()
         except queue.Empty:
             pass

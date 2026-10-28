@@ -18,14 +18,16 @@ only. Tokens do not appear in source, logs, fixtures, issues, or agent docs.
 - `src/novel.py`: HTML and metadata parse
 - `src/builder.py` / `src/epub.py`: output and cache
 - `src/helper.py` / `src/const.py`: shared IO and constants
+- `src/reading_list.py`: reading label and chapter progress for the local library
 - `output/`: generated books and caches
 - `docs/`: captured API responses and OpenAPI specs
 
 ## Pointers
 
 - `CODING_STANDARDS.md`: review; write comments; change CLI/GUI options; touch
-  auth, cache, book identity, cancel, recap, image hosts, or API contracts;
-  add tests; first `git add` of `docs/` or `tests/`
+  auth, cache, book identity, cancel, recap, image hosts, API contracts,
+  reading progress, or reading labels; add tests; first `git add` of `docs/`
+  or `tests/`
 - `CODING_STANDARDS.md` Tests: test command, FakeSession home, what a test asserts.
 - `tests/conftest.py`, `tests/test_api.py`: add tests.
 - `docs/novelpia-api.openapi.yaml`: change request or response shapes in

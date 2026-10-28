@@ -311,6 +311,51 @@ def test_build_epub_rebuilds_when_chapter_revisions_do_not_match(
     assert "two" not in chapters
 
 
+def test_epub_rebuild_keeps_the_in_book_bookmark(monkeypatch, tmp_path, novel_data, episodes):
+    monkeypatch.setattr(
+        builder,
+        "fetch_novel_and_episodes",
+        lambda *args, **kwargs: (novel_data, episodes, _metadata(novel_data, title="Book")),
+    )
+    book_dir = tmp_path / "book"
+    book_dir.mkdir()
+    (book_dir / "metadata.json").write_text(
+        json.dumps({"chapter": 2, "novel_id": 42, "flag_detail_trans": 4}),
+        encoding="utf-8",
+    )
+    records = []
+    for index, episode in enumerate(episodes, 1):
+        record = {
+            "idx": index,
+            "episode_no": episode["episode_no"],
+            "title": episode["epi_title"],
+            "url": f"{BASE_URL}/viewer/{episode['episode_no']}",
+        }
+        if index == 2:
+            record["flag_detail_trans"] = episode["flag_detail_trans"]
+        records.append(record)
+    (book_dir / "chapters.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    bookmark = b"encoding=json+base64:\nbookmark\n"
+    with zipfile.ZipFile(book_dir / "book.epub", "w") as archive:
+        archive.writestr("chap_0001.xhtml", "one")
+        archive.writestr("META-INF/calibre_bookmarks.txt", bookmark)
+
+    result = builder.build_epub(DummyFetchClient(), 42, str(tmp_path), update_mode=True)
+
+    assert result[0] == str(book_dir / "book.epub")
+    with zipfile.ZipFile(result[0]) as archive:
+        assert archive.read("META-INF/calibre_bookmarks.txt") == bookmark
+        chapters = "\n".join(
+            archive.read(name).decode("utf-8")
+            for name in archive.namelist()
+            if name.endswith(".xhtml") and "chap_" in name
+        )
+    assert "body 101" in chapters
+
+
 def test_build_epub_update_replaces_preview_titles_from_cache(tmp_path, novel_data):
     preview_title = (
         "# Dating My Celebrity Sister at the Karaoke (8)\n\n"

@@ -3,6 +3,7 @@ import hashlib
 import os
 import json
 import logging
+import shutil
 import zipfile
 
 from typing import Callable, Dict, List, Optional, Tuple
@@ -23,6 +24,8 @@ from src.helper import (
 from src.novel import NovelMetadata
 
 logger = logging.getLogger("pia_scrap")
+
+_READER_BOOKMARK = "META-INF/calibre_bookmarks.txt"
 
 IMAGE_INDEX_VERSION = 1
 _COVER_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg"}
@@ -210,6 +213,53 @@ class _EpubImageStore:
                 logger.warning(
                     f"Could not write image index {self.paths.image_index_path}: {exc}"
                 )
+
+
+def preserve_reader_bookmarks(previous_epub: str, new_epub: str) -> None:
+    """Copy Calibre's in-book bookmark onto the rewritten EPUB.
+
+    If the copy does not land, new_epub stays as written so the rebuild
+    still replaces the previous file.
+    """
+    if not previous_epub or not new_epub:
+        return
+    if os.path.abspath(previous_epub) == os.path.abspath(new_epub):
+        return
+    if not os.path.isfile(previous_epub) or not os.path.isfile(new_epub):
+        return
+    try:
+        with zipfile.ZipFile(previous_epub) as source:
+            original = _zip_member(source.namelist(), _READER_BOOKMARK)
+            if not original:
+                return
+            data = source.read(original)
+    except (OSError, zipfile.BadZipFile) as exc:
+        logger.warning(f"Could not read the in-book bookmark from {previous_epub}: {exc}")
+        return
+    merged = new_epub + ".bookmark"
+    try:
+        shutil.copyfile(new_epub, merged)
+        with zipfile.ZipFile(merged, "a") as dest:
+            existing = {name.replace("\\", "/").casefold() for name in dest.namelist()}
+            if _READER_BOOKMARK.casefold() not in existing:
+                dest.writestr(_READER_BOOKMARK, data)
+        os.replace(merged, new_epub)
+    except (OSError, zipfile.BadZipFile) as exc:
+        logger.warning(f"Could not keep the in-book bookmark on {new_epub}: {exc}")
+    finally:
+        if os.path.exists(merged):
+            try:
+                os.remove(merged)
+            except OSError:
+                pass
+
+
+def _zip_member(names, wanted: str):
+    folded = wanted.replace("\\", "/").casefold()
+    for name in names:
+        if name.replace("\\", "/").casefold() == folded:
+            return name
+    return None
 
 
 class EpubBuilder:
@@ -423,6 +473,7 @@ class EpubBuilder:
         try:
             # Write to a sibling .tmp and replace so a failed build keeps the previous EPUB.
             epub.write_epub(temp_path, book, {})
+            preserve_reader_bookmarks(out_path, temp_path)
             os.replace(temp_path, out_path)
         finally:
             if os.path.exists(temp_path):
