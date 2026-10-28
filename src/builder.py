@@ -287,7 +287,7 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
                 revisions_match = _chapter_revisions_match(paths.chapters_path, ep_list)
                 packaged_chapters = _epub_chapter_count(epub_path) if os.path.exists(epub_path) else -1
                 if should_skip_epub_update(
-                    revisions_match=revisions_match,
+                    revisions_match=revisions_match and meta.get("output_format") != "txt",
                     epub_exists=os.path.exists(epub_path),
                     existing_chapters=existing_chapters,
                     packaged_chapters=packaged_chapters,
@@ -404,7 +404,7 @@ def build_txt(client, novel_id, out_dir, max_chapters=None, threads=1,
 
     if status_cb:
         status_cb("Writing metadata files...")
-    build_metadata(book_dir, data_novel, novel_id, ep_list, metadata=metadata)
+    build_metadata(book_dir, data_novel, novel_id, ep_list, metadata=metadata, output_format="txt")
 
     return book_dir, title, len(fetched_results)
 
@@ -414,6 +414,7 @@ def build_metadata(
     novel_id,
     ep_list,
     metadata: Optional[NovelMetadata] = None,
+    output_format: str = "epub",
 ):
     if metadata is None:
         metadata = parse_novel_metadata(data_novel, novel_id)
@@ -428,6 +429,9 @@ def build_metadata(
         "status": metadata.status,
         "description": metadata.description,
     }
+
+    if output_format == "txt":
+        meta["output_format"] = "txt"
 
     chapters_path = os.path.join(book_dir, "chapters.jsonl")
     chapter_lines = []

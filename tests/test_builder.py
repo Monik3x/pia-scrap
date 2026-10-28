@@ -770,3 +770,15 @@ def test_load_or_fetch_uses_cached_html_without_resanitizing(tmp_path, episodes)
     assert "<!-- keep me -->" not in html_from_episode_text(cached_html)
 
 
+
+
+def test_txt_update_does_not_mark_existing_epub_current(monkeypatch, tmp_path, novel_data, episodes):
+    monkeypatch.setattr(builder, "fetch_novel_and_episodes",
+                        lambda *a, **k: (novel_data, episodes, _metadata(novel_data)))
+    original, _, _ = builder.build_epub(DummyFetchClient(), 42, str(tmp_path), update_mode=True)
+    episodes[0]["epi_title"] = "Revised first chapter"
+    builder.build_txt(DummyFetchClient(), 42, str(tmp_path), update_mode=True)
+    rebuilt, _, _ = builder.build_epub(DummyFetchClient(), 42, str(tmp_path), update_mode=True)
+    assert rebuilt == original
+    with zipfile.ZipFile(rebuilt) as archive:
+        assert b"Revised first chapter" in archive.read("EPUB/chap_0001.xhtml")

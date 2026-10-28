@@ -104,6 +104,8 @@ The Local Library tab can also store a reading label and a chapter number for ea
 
 ## Output
 
+TXT writes mark `metadata.json` with `output_format=txt` so the next EPUB update rebuilds instead of treating TXT chapter revisions as proof the EPUB is current.
+
 Files are written to `output/<title>/`:
 
 ```text
