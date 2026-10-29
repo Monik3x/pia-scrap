@@ -1,5 +1,7 @@
+import base64
 import json
 import zipfile
+from pathlib import Path
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -782,3 +784,224 @@ def test_txt_update_does_not_mark_existing_epub_current(monkeypatch, tmp_path, n
     assert rebuilt == original
     with zipfile.ZipFile(rebuilt) as archive:
         assert b"Revised first chapter" in archive.read("EPUB/chap_0001.xhtml")
+
+
+def test_rebuild_keeps_library_progress_on_same_episode(monkeypatch, tmp_path, novel_data, episodes):
+    from pathlib import Path
+    from src import reading_list
+    monkeypatch.setattr(builder, "fetch_novel_and_episodes",
+                        lambda *a, **k: (novel_data, episodes, _metadata(novel_data)))
+    original, _, _ = builder.build_epub(DummyFetchClient(), 42, str(tmp_path), update_mode=True)
+    with zipfile.ZipFile(original, "a") as archive:
+        archive.writestr(reading_list.EMBEDDED_BOOKMARK, json.dumps([{
+            "type": "last-read", "pos": "epubcfi(/8/2/4/1:0)",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+        }]))
+    episodes.insert(0, {"episode_no": 100, "epi_title": "Prologue", "flag_detail_trans": 1})
+    builder.build_epub(DummyFetchClient(), 42, str(tmp_path), update_mode=True)
+    folder = str(Path(original).parent)
+    reading_list.sync_embedded_progress(folder)
+    assert reading_list.read_bookmark(folder) == {"idx": 3, "episode_no": 102}
+
+
+@pytest.mark.parametrize("encoded", [False, True])
+@pytest.mark.parametrize("pos,expected", [
+    ("epubcfi(/8/2/4/1:7)", "epubcfi(/10/2/4/1:7)"),
+    ("epubcfi(/6/2/4/1:7)", "epubcfi(/8/2/4/1:7)"),
+    ("epubcfi(/6/8[chapter_1]!/4/2/1:7)", "epubcfi(/6/10[chapter_2]!/4/2/1:7)"),
+])
+def test_rebuild_remaps_embedded_positions_by_episode(
+    monkeypatch, tmp_path, novel_data, episodes, encoded, pos, expected
+):
+    monkeypatch.setattr(builder, "fetch_novel_and_episodes",
+                        lambda *a, **k: (novel_data, episodes, _metadata(novel_data)))
+    original, _, _ = builder.build_epub(DummyFetchClient(), 42, str(tmp_path), update_mode=True)
+    annotations = [
+        {"type": kind, "pos": pos, "pos_type": "epubcfi", "title": "My place",
+         "timestamp": "2026-01-01T00:00:00+00:00"}
+        for kind in ("last-read", "bookmark")
+    ]
+    raw = json.dumps(annotations).encode()
+    if encoded:
+        raw = b"encoding=json+base64:\n" + base64.b64encode(raw) + b"\n"
+    with zipfile.ZipFile(original, "a") as archive:
+        archive.writestr("META-INF/calibre_bookmarks.txt", raw)
+    episodes.insert(0, {"episode_no": 100, "epi_title": "Prologue", "flag_detail_trans": 1})
+    builder.build_epub(DummyFetchClient(), 42, str(tmp_path), update_mode=True)
+    with zipfile.ZipFile(original) as archive:
+        raw = archive.read("META-INF/calibre_bookmarks.txt")
+        assert b"body 102" in archive.read("EPUB/chap_0003.xhtml")
+    if encoded:
+        raw = base64.b64decode(raw.split(b"\n", 1)[1])
+    saved = json.loads(raw)
+    for item in annotations:
+        item["pos"] = expected
+    assert saved == annotations
+
+
+@pytest.mark.parametrize("change,expected", [
+    ("remove-before", "epubcfi(/6/2/4/1:7)"),
+    ("remove-marked", "epubcfi(/6/2/4/1:0)"),
+    ("edit-marked", "epubcfi(/8/2/4/1:0)"),
+    ("txt-before-insert", "epubcfi(/10/2/4/1:7)"),
+    ("legacy-insert", "epubcfi(/10/2/4/1:7)"),
+    ("legacy-txt-before-insert", "epubcfi(/10/2/4/1:7)"),
+])
+def test_rebuild_handles_changed_or_legacy_chapters(
+    monkeypatch, tmp_path, novel_data, episodes, change, expected
+):
+    monkeypatch.setattr(builder, "fetch_novel_and_episodes",
+                        lambda *a, **k: (novel_data, episodes, _metadata(novel_data)))
+    original, _, _ = builder.build_epub(DummyFetchClient(), 42, str(tmp_path), update_mode=True)
+    if change in {"legacy-insert", "legacy-txt-before-insert"}:
+        with zipfile.ZipFile(original) as archive:
+            members = [(info, archive.read(info)) for info in archive.infolist()
+                       if info.filename != "META-INF/novelpia-chapters.json"]
+        with zipfile.ZipFile(original, "w") as archive:
+            for info, data in members:
+                archive.writestr(info, data)
+    with zipfile.ZipFile(original, "a") as archive:
+        archive.writestr("META-INF/calibre_bookmarks.txt", json.dumps([
+            {"type": "last-read", "pos": "epubcfi(/8/2/4/1:7)"},
+            {"type": "custom", "payload": "keep me"},
+        ]))
+    if change == "remove-before":
+        episodes.pop(0)
+    elif change == "remove-marked":
+        episodes.pop()
+    elif change == "edit-marked":
+        episodes[1]["epi_title"] = "Revised title"
+    else:
+        episodes.insert(0, {"episode_no": 100, "epi_title": "Prologue", "flag_detail_trans": 1})
+        if change in {"txt-before-insert", "legacy-txt-before-insert"}:
+            with zipfile.ZipFile(original) as archive:
+                before = {info.filename: archive.read(info) for info in archive.infolist()}
+            original_bytes = Path(original).read_bytes()
+            builder.build_txt(DummyFetchClient(), 42, str(tmp_path), update_mode=True)
+            if change == "txt-before-insert":
+                assert Path(original).read_bytes() == original_bytes
+            else:
+                with zipfile.ZipFile(original) as archive:
+                    after = {info.filename: archive.read(info) for info in archive.infolist()}
+                assert json.loads(after.pop("META-INF/novelpia-chapters.json")) == [None, None, 101, 102]
+                assert after == before
+    builder.build_epub(DummyFetchClient(), 42, str(tmp_path), update_mode=change != "remove-marked")
+    with zipfile.ZipFile(original) as archive:
+        saved = json.loads(archive.read("META-INF/calibre_bookmarks.txt"))
+    assert saved == [{"type": "last-read", "pos": expected},
+                     {"type": "custom", "payload": "keep me"}]
+
+
+def test_txt_marks_mismatched_legacy_chapters_unresolved(monkeypatch, tmp_path, novel_data, episodes, caplog):
+    monkeypatch.setattr(builder, "fetch_novel_and_episodes",
+                        lambda *a, **k: (novel_data, episodes, _metadata(novel_data)))
+    original, _, _ = builder.build_epub(DummyFetchClient(), 42, str(tmp_path), update_mode=True)
+    with zipfile.ZipFile(original) as archive:
+        members = [(info, archive.read(info)) for info in archive.infolist()
+                   if info.filename != "META-INF/novelpia-chapters.json"]
+    with zipfile.ZipFile(original, "w") as archive:
+        for info, data in members:
+            archive.writestr(info, data)
+        archive.writestr("META-INF/calibre_bookmarks.txt", json.dumps([
+            {"type": "last-read", "pos": "epubcfi(/8/2/4/1:7)"}
+        ]))
+    chapter_path = tmp_path / "a-test-novel" / "chapters.jsonl"
+    rows = [json.loads(line) for line in chapter_path.read_text(encoding="utf-8").splitlines()]
+    rows[1]["title"] = "stale"
+    chapter_path.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+    episodes.insert(0, {"episode_no": 100, "epi_title": "Prologue", "flag_detail_trans": 1})
+    builder.build_txt(DummyFetchClient(), 42, str(tmp_path), update_mode=True)
+    assert "unresolved" in caplog.text.lower()
+    builder.build_epub(DummyFetchClient(), 42, str(tmp_path), update_mode=True)
+    with zipfile.ZipFile(original) as archive:
+        saved = json.loads(archive.read("META-INF/calibre_bookmarks.txt"))
+    assert saved[0]["pos"] == "epubcfi(/8/2/4/1:7)"
+
+
+def test_txt_preserves_legacy_epub_and_chapter_list_if_migration_fails(
+    monkeypatch, tmp_path, novel_data, episodes
+):
+    monkeypatch.setattr(builder, "fetch_novel_and_episodes",
+                        lambda *a, **k: (novel_data, episodes, _metadata(novel_data)))
+    original, _, _ = builder.build_epub(DummyFetchClient(), 42, str(tmp_path), update_mode=True)
+    with zipfile.ZipFile(original) as archive:
+        members = [(info, archive.read(info)) for info in archive.infolist()
+                   if info.filename != "META-INF/novelpia-chapters.json"]
+    with zipfile.ZipFile(original, "w") as archive:
+        for info, data in members:
+            archive.writestr(info, data)
+    from src import epub as epub_module
+    old_epub = Path(original).read_bytes()
+    chapter_path = tmp_path / "a-test-novel" / "chapters.jsonl"
+    old_chapters = chapter_path.read_bytes()
+
+    def fail_replace(source, dest):
+        if str(dest) == original:
+            raise OSError("migration failed")
+        return original_replace(source, dest)
+
+    original_replace = epub_module.os.replace
+    monkeypatch.setattr(epub_module.os, "replace", fail_replace)
+    episodes.insert(0, {"episode_no": 100, "epi_title": "Prologue", "flag_detail_trans": 1})
+    with pytest.raises(OSError, match="migration failed"):
+        builder.build_txt(DummyFetchClient(), 42, str(tmp_path), update_mode=True)
+    assert Path(original).read_bytes() == old_epub
+    assert chapter_path.read_bytes() == old_chapters
+
+
+@pytest.mark.parametrize("marked,remaining,expected", [
+    (102, [101, 103], {"idx": 2, "episode_no": 103}),
+    (103, [101, 102], {"idx": 2, "episode_no": 102}),
+])
+def test_rebuild_relocates_removed_sidecar_episode(monkeypatch, tmp_path, novel_data, episodes, marked, remaining, expected):
+    from pathlib import Path
+    from src import reading_list
+    episodes.append({"episode_no": 103, "epi_title": "Third", "flag_detail_trans": 1})
+    monkeypatch.setattr(builder, "fetch_novel_and_episodes",
+                        lambda *a, **k: (novel_data, episodes, _metadata(novel_data)))
+    original, _, _ = builder.build_epub(DummyFetchClient(), 42, str(tmp_path), update_mode=True)
+    folder = str(Path(original).parent)
+    reading_list.write_bookmark(folder, marked - 100, marked)
+    episodes[:] = [ep for ep in episodes if ep["episode_no"] in remaining]
+
+    def refresh_progress(status):
+        if status == "Finalizing metadata...":
+            reading_list.resolve_bookmark(folder, reading_list.read_bookmark(folder))
+
+    builder.build_epub(DummyFetchClient(), 42, str(tmp_path), update_mode=False,
+                       status_cb=refresh_progress)
+    assert reading_list.read_bookmark(folder) == expected
+
+
+@pytest.mark.parametrize("action", ["fail", "manual"])
+def test_rebuild_does_not_overwrite_progress_on_failure_or_manual_edit(monkeypatch, tmp_path, novel_data, episodes, action):
+    from pathlib import Path
+    from src import reading_list
+    episodes.append({"episode_no": 103, "epi_title": "Third", "flag_detail_trans": 1})
+    monkeypatch.setattr(builder, "fetch_novel_and_episodes",
+                        lambda *a, **k: (novel_data, episodes, _metadata(novel_data)))
+    original, _, _ = builder.build_epub(DummyFetchClient(), 42, str(tmp_path), update_mode=True)
+    folder = str(Path(original).parent)
+    reading_list.write_bookmark(folder, 2, 102)
+    before = Path(folder, reading_list.BOOKMARK_FILENAME).read_bytes()
+    if action == "fail":
+        with zipfile.ZipFile(original, "a") as archive:
+            archive.writestr(reading_list.EMBEDDED_BOOKMARK, json.dumps([{
+                "type": "last-read", "pos": "epubcfi(/6/2/4/1:0)",
+                "timestamp": "2099-01-01T00:00:00+00:00",
+            }]))
+    episodes.pop(1)
+    real_build = EpubBuilder.build
+    def build_with_change(self, *args, **kwargs):
+        if action == "fail":
+            raise RuntimeError("build failed")
+        reading_list.write_bookmark(folder, 1, 101)
+        return real_build(self, *args, **kwargs)
+    monkeypatch.setattr(EpubBuilder, "build", build_with_change)
+    if action == "fail":
+        with pytest.raises(RuntimeError, match="build failed"):
+            builder.build_epub(DummyFetchClient(), 42, str(tmp_path), update_mode=False)
+        assert Path(folder, reading_list.BOOKMARK_FILENAME).read_bytes() == before
+    else:
+        builder.build_epub(DummyFetchClient(), 42, str(tmp_path), update_mode=False)
+        assert reading_list.read_bookmark(folder) == {"idx": 1, "episode_no": 101}

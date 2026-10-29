@@ -18,12 +18,8 @@ BOOKMARK_FILENAME = "calibre_bookmarks.txt"
 LABELS_FILENAME = "reading_labels.json"
 BUILTIN_LABELS = ("Reading", "Plan to read", "On hold", "Dropped", "Completed")
 EMBEDDED_BOOKMARK = "META-INF/calibre_bookmarks.txt"
+EMBEDDED_CHAPTERS = "META-INF/novelpia-chapters.json"
 
-_CHAP_FILE = re.compile(r"chap_(\d+)\.xhtml$", re.IGNORECASE)
-_CHAPTER_NUMBER = re.compile(
-    r"^(?:chapter|ch|ep|episode)\.?\s*(\d+)\b|^c(\d+)\b",
-    re.IGNORECASE,
-)
 _CFI_STEP = re.compile(r"/(\d+)")
 _EMBED_CACHE: Dict[tuple, Optional[Tuple[int, int, Optional[float]]]] = {}
 _DISK_MISS = object()
@@ -31,6 +27,7 @@ _UNRESOLVED = object()
 _progress_lock = threading.RLock()
 _label_lock = threading.RLock()
 _disk_cache = {"path": None, "entries": {}, "dirty": False}
+_embed_cache_lock = threading.RLock()
 
 
 class _EmbeddedUnreadable(Exception):
@@ -132,6 +129,55 @@ def clear_bookmark(folder: str) -> None:
             pass
 
 
+def surviving_episode_index(old, indices, index):
+    candidates = [old[index]] + old[index + 1:] + list(reversed(old[:index]))
+    return next((indices[episode] for episode in candidates if episode in indices), None)
+
+
+def bookmark_snapshot(folder: str):
+    path = _bookmark_path(folder)
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+            stat = os.fstat(handle.fileno())
+        return data, stat.st_mtime_ns, stat.st_size
+    except FileNotFoundError:
+        return None
+
+
+def publish_bookmark_if_unchanged(folder: str, snapshot, bookmark) -> bool:
+    with progress_transaction():
+        if bookmark_snapshot(folder) != snapshot:
+            return False
+        if bookmark is not None and read_bookmark(folder) != bookmark:
+            write_bookmark(folder, bookmark["idx"], bookmark["episode_no"])
+        return True
+
+
+def bookmark_for_rebuild(folder: str, old, new):
+    current = read_bookmark(folder)
+    try:
+        located = _locate_embedded_progress(folder)
+    except (OSError, UnicodeError, ValueError):
+        located = None
+    if located is not None:
+        idx, episode_no, timestamp = located
+        embedded = {"idx": idx, "episode_no": episode_no}
+        if current is None or (current != embedded and _embedded_is_newer(folder, timestamp)):
+            current = embedded
+    if current is None:
+        return None
+    try:
+        index = old.index(current["episode_no"])
+    except ValueError:
+        return current
+    indices = {episode: i for i, episode in enumerate(new) if episode is not None}
+    target = surviving_episode_index(old, indices, index)
+    if target is None:
+        return current
+    return {"idx": target + 1, "episode_no": new[target]}
+
+
 def read_chapter_line(folder: str, idx: int) -> Optional[dict]:
     target = int(idx)
     if target < 1:
@@ -227,11 +273,12 @@ def read_last_chapter(folder: str) -> Optional[dict]:
 
 def flush_embedded_cache() -> None:
     """Write checked in-book positions so a later launch can skip unchanged EPUBs."""
-    path = _disk_cache["path"]
-    if not _disk_cache["dirty"] or not path:
-        return
-    write_json_atomic(path, {"version": 1, "entries": _disk_cache["entries"]})
-    _disk_cache["dirty"] = False
+    with _embed_cache_lock:
+        path = _disk_cache["path"]
+        if not _disk_cache["dirty"] or not path:
+            return
+        write_json_atomic(path, {"version": 2, "entries": _disk_cache["entries"]})
+        _disk_cache["dirty"] = False
 
 
 def sync_embedded_progress(folder: str) -> Optional[Dict[str, int]]:
@@ -290,7 +337,7 @@ def _load_embed_cache(folder: str) -> None:
         return
     except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
         return
-    if not isinstance(payload, dict) or payload.get("version") != 1:
+    if not isinstance(payload, dict) or payload.get("version") != 2:
         return
     entries = payload.get("entries")
     if not isinstance(entries, dict):
@@ -350,6 +397,11 @@ def _remember_embed(folder: str, key, located) -> None:
 
 
 def _locate_embedded_progress(folder: str):
+    with _embed_cache_lock:
+        return _locate_embedded_progress_locked(folder)
+
+
+def _locate_embedded_progress_locked(folder: str):
     epub_path = _epub_path(folder)
     if not epub_path:
         return None
@@ -397,14 +449,29 @@ def _read_embedded_progress(folder: str, epub_path: str):
             index = _spine_index(item.get("pos"))
             if index is None or index < 0 or index >= len(hrefs):
                 return _UNRESOLVED
-            href = hrefs[index]
-            nav_name = _pick_member(names, suffix="nav.xhtml")
-            titles = {}
-            if nav_name:
-                titles = _toc_titles(archive.read(nav_name), nav_name.replace("\\", "/"))
+            manifest_name = _zip_name(names, EMBEDDED_CHAPTERS)
+            rows = _load_chapters(folder)
+            if manifest_name:
+                try:
+                    episodes = json.loads(archive.read(manifest_name))
+                except (ValueError, UnicodeError):
+                    return _UNRESOLVED
+                if not isinstance(episodes, list) or len(episodes) != len(hrefs):
+                    return _UNRESOLVED
+                ids = [episode for episode in episodes if episode is not None]
+                if (any(type(episode) is not int or episode < 1 for episode in ids)
+                        or len(set(ids)) != len(ids)):
+                    return _UNRESOLVED
+                episode = episodes[index]
+                matches = [row for row in rows if episode is not None and _episode_no(row) == episode]
+                row = matches[0] if len(matches) == 1 else None
+            else:
+                href = hrefs[index]
+                nav_name = _pick_member(names, suffix="nav.xhtml")
+                titles = _toc_titles(archive.read(nav_name), nav_name.replace("\\", "/")) if nav_name else {}
+                row = _match_chapter(rows, _toc_title(titles, href))
     except (OSError, zipfile.BadZipFile, UnicodeError, ValueError) as exc:
         raise _EmbeddedUnreadable from exc
-    row = _match_chapter(_load_chapters(folder), href, _toc_title(titles, href))
     if row is None:
         return _UNRESOLVED
     idx = _idx(row)
@@ -525,11 +592,7 @@ def _spine_hrefs(opf_bytes: bytes, opf_name: str) -> List[str]:
         if _local(elem.tag) != "itemref":
             continue
         href = href_by_id.get(elem.get("idref") or "")
-        if not href:
-            continue
-        resolved = _resolve_href(base, href)
-        if resolved:
-            hrefs.append(resolved)
+        hrefs.append(_resolve_href(base, href) if href else "")
     return hrefs
 
 
@@ -601,37 +664,10 @@ def _load_chapters(folder: str) -> List[dict]:
     return rows
 
 
-def _match_chapter(rows: List[dict], href: str, toc_title: str) -> Optional[dict]:
-    name = href.rsplit("/", 1)[-1]
-    file_match = _CHAP_FILE.search(name)
-    file_idx = int(file_match.group(1)) if file_match else None
+def _match_chapter(rows: List[dict], toc_title: str) -> Optional[dict]:
     title = (toc_title or "").strip()
-    title_hits = [row for row in rows if title and _same_title(row.get("title"), title)]
-    file_row = next((row for row in rows if file_idx is not None and _idx(row) == file_idx), None)
-    if len(title_hits) == 1:
-        return title_hits[0]
-    if file_row is not None and (not title_hits or file_row in title_hits):
-        return file_row
-    number = _chapter_number(title)
-    if number is None:
-        return None
-    return next((row for row in rows if _idx(row) == number), None)
-
-
-def _chapter_number(title: str) -> Optional[int]:
-    if not title:
-        return None
-    match = _CHAPTER_NUMBER.match(title.strip())
-    if not match:
-        return None
-    raw = next(group for group in match.groups() if group)
-    try:
-        number = int(raw)
-    except ValueError:
-        return None
-    if number < 1:
-        return None
-    return number
+    hits = [row for row in rows if title and _same_title(row.get("title"), title)]
+    return hits[0] if len(hits) == 1 else None
 
 
 def _same_title(left, right) -> bool:

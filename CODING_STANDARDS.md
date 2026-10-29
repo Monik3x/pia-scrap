@@ -49,6 +49,8 @@ Reading progress is `calibre_bookmarks.txt` in the book folder. `idx` is the cha
 
 ## Book identity
 
+EPUBs store their packaged episode order in `META-INF/novelpia-chapters.json`. Rebuilds use it to remap embedded Calibre last-read positions and named bookmarks. Keep the local CFI for unchanged chapter bytes. Edited chapters restart at the chapter beginning. A removed chapter falls forward to the next surviving old chapter, or backward if none follows. Older EPUBs use `chapters.jsonl` only when its titles match the packaged chapters. Unreadable or unsupported bookmark data is preserved as-is.
+
 A local book is identified by novel ID. Write `.novel_id` before cache or EPUB work so a cancelled run still owns the folder. Title changes keep the existing folder. Reuse a folder only when it already belongs to that novel ID. When the novel endpoint says the novel does not exist (HTTP 404 or 500 with that body) and a local folder already claims that ID, write `.retired`, delete `.novel_id`, and leave the files. `book_directory_novel_id` ignores a retired folder, including a queue index entry that still names it. A later download of that ID starts a new folder. A 404 from another request, a missing episode list, or missing metadata does not release the ID.
 
 ## Images

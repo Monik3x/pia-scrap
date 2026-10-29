@@ -1,9 +1,12 @@
 import html
+import base64
 import hashlib
 import os
 import json
 import logging
+import re
 import shutil
+import tempfile
 import zipfile
 
 from typing import Callable, Dict, List, Optional, Tuple
@@ -22,10 +25,133 @@ from src.helper import (
     write_json_atomic,
 )
 from src.novel import NovelMetadata
+from src.reading_list import surviving_episode_index
 
 logger = logging.getLogger("pia_scrap")
 
 _READER_BOOKMARK = "META-INF/calibre_bookmarks.txt"
+_READER_CHAPTERS = "META-INF/novelpia-chapters.json"
+
+
+def _reader_chapters(archive: zipfile.ZipFile, previous_epub: str) -> List[Optional[int]]:
+    if _READER_CHAPTERS in archive.namelist():
+        chapters = json.loads(archive.read(_READER_CHAPTERS))
+        if not isinstance(chapters, list) or any(
+            episode is not None and type(episode) is not int for episode in chapters
+        ):
+            raise ValueError("Invalid packaged episode order")
+        return chapters
+    path = os.path.join(os.path.dirname(previous_epub), "chapters.jsonl")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            rows = [json.loads(line) for line in handle if line.strip()]
+    except FileNotFoundError:
+        return []
+    names = [name for name in archive.namelist()
+             if re.fullmatch(r"EPUB/chap_\d{4}\.xhtml", name)]
+    if len(names) != len(rows):
+        return []
+    # Nav and About precede numbered chapters in this builder's spine.
+    result = [None, None]
+    for row in rows:
+        if int(row["idx"]) != len(result) - 1:
+            return []
+        name = f"EPUB/chap_{int(row['idx']):04d}.xhtml"
+        if name not in archive.namelist():
+            return []
+        soup = BeautifulSoup(archive.read(name), "xml")
+        if soup.title is None or soup.title.get_text() != row.get("title"):
+            return []
+        episode = int(row["episode_no"])
+        if episode in result:
+            return []
+        result.append(episode)
+    return result
+
+
+def preserve_legacy_chapter_order(epub_path: str) -> None:
+    if not os.path.isfile(epub_path):
+        return
+    with zipfile.ZipFile(epub_path) as archive:
+        if _READER_CHAPTERS in archive.namelist():
+            return
+        try:
+            chapters = _reader_chapters(archive, epub_path)
+        except (ValueError, KeyError, TypeError, UnicodeError):
+            chapters = []
+        if not chapters:
+            logger.warning(
+                f"In-book bookmark remapping is unresolved for {epub_path}: "
+                "the legacy chapter list does not match the EPUB."
+            )
+    fd, temporary = tempfile.mkstemp(prefix=".chapter-order-", suffix=".tmp",
+                                     dir=os.path.dirname(epub_path))
+    os.close(fd)
+    try:
+        shutil.copyfile(epub_path, temporary)
+        with zipfile.ZipFile(temporary, "a") as archive:
+            archive.writestr(_READER_CHAPTERS, json.dumps(chapters))
+        os.replace(temporary, epub_path)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
+
+
+def _remap_reader_bookmarks(
+    data: bytes, source: zipfile.ZipFile, dest: zipfile.ZipFile, previous_epub: str
+) -> bytes:
+    encoded = data.startswith(b"encoding=json+base64:")
+    raw = base64.b64decode(b"".join(data.splitlines()[1:])) if encoded else data
+    try:
+        annotations = json.loads(raw)
+    except (ValueError, UnicodeError):
+        return data
+    if not isinstance(annotations, list):
+        return data
+    old = _reader_chapters(source, previous_epub)
+    new = _reader_chapters(dest, previous_epub)
+    if not old or not new:
+        return data
+    new_indices = {episode: i for i, episode in enumerate(new) if episode is not None}
+    changed = False
+    for item in annotations:
+        if not isinstance(item, dict) or item.get("type") not in {"last-read", "bookmark"}:
+            continue
+        pos = item.get("pos")
+        if not isinstance(pos, str):
+            continue
+        standard = "!" in pos
+        prefix = r"/6" if standard else ""
+        match = re.fullmatch(
+            r"epubcfi\(" + prefix + r"/(?P<step>\d+)(?P<assertion>\[[^\]]*\])?(?P<local>[!/].*)\)", pos
+        )
+        if not match:
+            continue
+        if standard and not match['local'].startswith('!'):
+            continue
+        step = int(match['step'])
+        index = step // 2 - 1
+        if step < 2 or step % 2 or index >= len(old) or old[index] is None:
+            continue
+        episode = old[index]
+        removed = episode not in new_indices
+        target = surviving_episode_index(old, new_indices, index)
+        if target is None:
+            continue
+        old_name = f"EPUB/chap_{index - 1:04d}.xhtml"
+        new_name = f"EPUB/chap_{target - 1:04d}.xhtml"
+        same_content = not removed and source.read(old_name) == dest.read(new_name)
+        local = match['local'] if same_content else ('!/4/2/1:0' if standard else '/2/4/1:0')
+        assertion = f"[chapter_{target - 2}]" if standard and match['assertion'] else ''
+        prefix = '/6' if standard else ''
+        updated = f"epubcfi({prefix}/{2 * (target + 1)}{assertion}{local})"
+        if updated != pos:
+            item['pos'] = updated
+            changed = True
+    if not changed:
+        return data
+    raw = json.dumps(annotations, ensure_ascii=False).encode('utf-8')
+    return b"encoding=json+base64:\n" + base64.b64encode(raw) + b"\n" if encoded else raw
 
 IMAGE_INDEX_VERSION = 1
 _COVER_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg"}
@@ -216,7 +342,7 @@ class _EpubImageStore:
 
 
 def preserve_reader_bookmarks(previous_epub: str, new_epub: str) -> None:
-    """Copy Calibre's in-book bookmark onto the rewritten EPUB.
+    """Remap Calibre positions by episode and keep them in the rewritten EPUB.
 
     If the copy does not land, new_epub stays as written so the rebuild
     still replaces the previous file.
@@ -233,6 +359,11 @@ def preserve_reader_bookmarks(previous_epub: str, new_epub: str) -> None:
             if not original:
                 return
             data = source.read(original)
+            try:
+                with zipfile.ZipFile(new_epub) as dest:
+                    data = _remap_reader_bookmarks(data, source, dest, previous_epub)
+            except (OSError, ValueError, KeyError, TypeError, UnicodeError, zipfile.BadZipFile) as exc:
+                logger.warning(f"Could not remap the in-book bookmark: {exc}")
     except (OSError, zipfile.BadZipFile) as exc:
         logger.warning(f"Could not read the in-book bookmark from {previous_epub}: {exc}")
         return
@@ -473,6 +604,10 @@ class EpubBuilder:
         try:
             # Write to a sibling .tmp and replace so a failed build keeps the previous EPUB.
             epub.write_epub(temp_path, book, {})
+            with zipfile.ZipFile(temp_path, "a") as archive:
+                archive.writestr(_READER_CHAPTERS, json.dumps(
+                    [None, None] + [int(chapter['epi_no']) for chapter in chapters]
+                ))
             preserve_reader_bookmarks(out_path, temp_path)
             os.replace(temp_path, out_path)
         finally:

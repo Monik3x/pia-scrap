@@ -5,8 +5,9 @@ import zipfile
 from typing import Callable, Dict, List, Optional
 
 from bs4 import BeautifulSoup
+from src import reading_list
 from src.const import BASE_URL, EPISODE_REVISION_FIELD
-from src.epub import EpubBuilder
+from src.epub import EpubBuilder, _reader_chapters, preserve_legacy_chapter_order
 from src.helper import (
     book_output_paths,
     ensure_book_identity,
@@ -338,6 +339,23 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
     )
     _raise_chapter_fetch_failures(chapters, "The existing EPUB was left unchanged.")
 
+    snapshot = None
+    relocated = None
+    progress_prepared = False
+    try:
+        snapshot = reading_list.bookmark_snapshot(book_dir)
+        try:
+            with zipfile.ZipFile(paths.epub_path) as archive:
+                old = _reader_chapters(archive, paths.epub_path)[2:]
+        except (OSError, ValueError, TypeError, KeyError, UnicodeError, zipfile.BadZipFile):
+            old = []
+        relocated = reading_list.bookmark_for_rebuild(
+            book_dir, old, [int(chapter["epi_no"]) for chapter in chapters]
+        )
+        progress_prepared = True
+    except OSError as exc:
+        logger.warning(f"Could not prepare reading progress before rebuild: {exc}")
+
     builder = EpubBuilder(out_dir)
     out_file, title, count = builder.build(
         metadata=metadata,
@@ -354,6 +372,12 @@ def build_epub(client, novel_id, out_dir, max_chapters=None, language="en", upda
         status_cb("Finalizing metadata...")
     ensure_dir(book_dir)
     build_metadata(book_dir, data_novel, novel_id, ep_list, metadata=metadata)
+
+    try:
+        if progress_prepared:
+            reading_list.publish_bookmark_if_unchanged(book_dir, snapshot, relocated)
+    except OSError as exc:
+        logger.warning(f"Could not relocate reading progress after rebuild: {exc}")
 
     return out_file, title, count
 
@@ -385,6 +409,7 @@ def build_txt(client, novel_id, out_dir, max_chapters=None, threads=1,
     _raise_chapter_fetch_failures(fetched_results, "No TXT files were written.")
 
     ensure_dir(book_dir)
+    preserve_legacy_chapter_order(paths.epub_path)
     if status_cb:
         status_cb("Saving TXT files to disk...")
     written_names = []

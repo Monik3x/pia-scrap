@@ -233,6 +233,8 @@ def test_set_disabled_until_chapter_data_is_loaded(tmp_path):
     (folder / "chapters.jsonl").write_text(json.dumps({"idx": 1, "episode_no": 100}) + "\n", encoding="utf-8")
     view._apply_library_row(view._library_generation, PiaScrapGUI._load_library_row(loader, str(tmp_path), "Book"))
     assert view.library_set_btn.state == "normal"
+
+
 def test_edit_jobs_survive_page_refreshes(tmp_path):
     from src import reading_list
 

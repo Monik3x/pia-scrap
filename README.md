@@ -104,6 +104,8 @@ The Local Library tab can also store a reading label and a chapter number for ea
 
 ## Output
 
+EPUB rebuilds preserve library progress and embedded Calibre last-read positions and named bookmarks by episode ID. Unchanged chapters keep their local position. Edited chapters restart at the beginning; removed chapters fall forward to the next surviving chapter, or backward if none follows.
+
 TXT writes mark `metadata.json` with `output_format=txt` so the next EPUB update rebuilds instead of treating TXT chapter revisions as proof the EPUB is current.
 
 Files are written to `output/<title>/`:
