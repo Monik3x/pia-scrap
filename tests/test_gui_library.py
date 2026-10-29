@@ -218,6 +218,45 @@ def test_library_refresh_preserves_selection_and_typed_chapter(tmp_path):
     assert view.library_set_btn.state == "disabled"
 
 
+def _loaded_row(folder, progress_idx):
+    return {
+        "folder": folder, "novel_id": 42, "chapter_count": 100,
+        "has_metadata": True, "has_chapters": True, "progress_idx": progress_idx,
+        "title": folder, "progress": f"c{progress_idx}" if progress_idx else "",
+        "latest": "c100", "status": "",
+    }
+
+
+def test_arriving_row_fills_empty_chapter_box_only_for_the_sole_selection(tmp_path):
+    view = library_view(tmp_path)
+    view.display_current_page()
+    view.library_tree.selection_set(["row-0"])
+    view._on_library_select()
+    assert view.chapter_entry.get() == ""
+    book = _loaded_row("Book", "4")
+    view._apply_library_row(view._library_generation - 1, book)
+    assert view.chapter_entry.get() == ""
+    view._apply_library_row(view._library_generation, _loaded_row("Book", ""))
+    assert view.chapter_entry.get() == ""
+    view._apply_library_row(view._library_generation, book)
+    assert view.chapter_entry.get() == "4"
+
+    view.chapter_entry.delete(0, "end")
+    view.library_tree.selection_set(["row-1"])
+    view._on_library_select()
+    view._apply_library_row(view._library_generation, book)
+    assert view.chapter_entry.get() == ""
+    view._apply_library_row(view._library_generation, _loaded_row("Other", "9"))
+    assert view.chapter_entry.get() == "9"
+
+    view.chapter_entry.delete(0, "end")
+    view.library_tree.selection_set(["row-0", "row-1"])
+    view._on_library_select()
+    view._apply_library_row(view._library_generation, book)
+    view._apply_library_row(view._library_generation, _loaded_row("Other", "9"))
+    assert view.chapter_entry.get() == ""
+
+
 def test_set_disabled_until_chapter_data_is_loaded(tmp_path):
     folder = tmp_path / "Book"
     folder.mkdir()

@@ -780,6 +780,9 @@ class PiaScrapGUI(ctk.CTk):
             break
         if touched is None or touched not in selected:
             return
+        progress_idx = row.get("progress_idx")
+        if len(selected) == 1 and progress_idx and not self.chapter_entry.get().strip():
+            self.chapter_entry.insert(0, str(progress_idx))
         self._update_library_actions()
 
     def prev_page(self):
