@@ -112,3 +112,170 @@ def test_open_book_reports_missing_epub_to_gui(tmp_path):
     task, message = view.gui_queue.get_nowait()
     assert task == "library_open_error"
     assert "No EPUB found" in message
+
+
+class Widget:
+    def __init__(self, value=""):
+        self.value = value
+        self.state = None
+
+    def get(self):
+        return self.value
+
+    def delete(self, *_):
+        self.value = ""
+
+    def insert(self, _, value):
+        self.value = str(value)
+
+    def configure(self, **kwargs):
+        self.state = kwargs.get("state", self.state)
+
+
+class Tree:
+    def __init__(self):
+        self.rows = {}
+        self.selected = ()
+
+    def get_children(self):
+        return tuple(self.rows)
+
+    def delete(self, *ids):
+        for row_id in ids:
+            del self.rows[row_id]
+        self.selected = ()
+
+    def heading(self, *args, **kwargs):
+        pass
+
+    def insert(self, parent, end, iid, values):
+        self.rows[iid] = values
+
+    def item(self, iid, values):
+        self.rows[iid] = values
+
+    def selection(self):
+        return self.selected
+
+    def selection_set(self, ids):
+        self.selected = tuple(ids)
+
+
+def library_view(out_dir):
+    view = SimpleNamespace(
+        _library_generation=0, _page_rows={}, _library_cache_lock=threading.Lock(),
+        _library_row_cache={}, _label_map={}, _library_jobs=queue.Queue(),
+        filtered_dirs=["Book", "Other"], current_page=0, items_per_page=10,
+        output_entry=Widget(str(out_dir)), chapter_entry=Widget(), library_tree=Tree(),
+        pag_label=Widget(), prev_btn=Widget(), next_btn=Widget(),
+        library_update_btn=Widget(), library_set_btn=Widget(),
+        _hide_library_preview=lambda: None, _show_library_table=lambda visible: None,
+    )
+    for name in (
+        "display_current_page", "_cached_library_row", "_library_cache_id",
+        "_page_row_info", "_library_values", "_on_library_select", "_selected_novel_ids",
+        "_apply_library_row", "_update_library_actions",
+    ):
+        setattr(view, name, getattr(PiaScrapGUI, name).__get__(view))
+    return view
+
+
+def test_library_refresh_preserves_selection_and_typed_chapter(tmp_path):
+    view = library_view(tmp_path)
+    view.display_current_page()
+    view.library_tree.selection_set(["row-0"])
+    view._on_library_select()
+    view.chapter_entry.insert(0, "37")
+    row = {"folder": "Book", "novel_id": 42, "chapter_count": 100,
+           "has_metadata": True, "has_chapters": True, "progress_idx": 3,
+           "title": "A Book", "progress": "c3", "latest": "c100", "status": ""}
+    view._apply_library_row(view._library_generation, row)
+    assert view.chapter_entry.get() == "37"
+    assert view.library_tree.rows["row-0"][0] == "A Book"
+    assert view.library_update_btn.state == "normal"
+    assert view.library_set_btn.state == "normal"
+    view._apply_library_row(view._library_generation - 1, dict(row, title="Old"))
+    assert view.library_tree.rows["row-0"][0] == "A Book"
+
+    view.filtered_dirs = ["Other", "Book"]
+    view.display_current_page()
+    view._on_library_select()
+    assert view.library_tree.selection() == ("row-1",)
+    assert view.chapter_entry.get() == "37"
+
+    view.library_tree.selection_set(["row-0"])
+    view._on_library_select()
+    assert view.chapter_entry.get() == ""
+    assert view.library_set_btn.state == "disabled"
+
+    view.library_tree.selection_set(["row-0", "row-1"])
+    view._on_library_select()
+    assert view.library_set_btn.state == "disabled"
+    view.filtered_dirs = []
+    view.display_current_page()
+    assert view.library_tree.selection() == ()
+    assert view.library_update_btn.state == "disabled"
+    assert view.library_set_btn.state == "disabled"
+
+
+def test_set_disabled_until_chapter_data_is_loaded(tmp_path):
+    folder = tmp_path / "Book"
+    folder.mkdir()
+    (folder / "metadata.json").write_text(json.dumps({"title": "Book", "chapter": 10}), encoding="utf-8")
+    loader = library_loader()
+    view = library_view(tmp_path)
+    view.display_current_page()
+    view.library_tree.selection_set(["row-0"])
+    view._on_library_select()
+    assert view.library_set_btn.state == "disabled"
+    view._apply_library_row(view._library_generation, PiaScrapGUI._load_library_row(loader, str(tmp_path), "Book"))
+    assert view.library_set_btn.state == "disabled"
+    (folder / "chapters.jsonl").write_text(json.dumps({"idx": 1, "episode_no": 100}) + "\n", encoding="utf-8")
+    view._apply_library_row(view._library_generation, PiaScrapGUI._load_library_row(loader, str(tmp_path), "Book"))
+    assert view.library_set_btn.state == "normal"
+def test_edit_jobs_survive_page_refreshes(tmp_path):
+    from src import reading_list
+
+    folder = tmp_path / "Book"
+    folder.mkdir()
+    (folder / "chapters.jsonl").write_text('{"idx": 1, "episode_no": 101}\n', encoding="utf-8")
+    view = library_loader()
+    view._library_jobs = queue.Queue()
+    view.gui_queue = queue.Queue()
+    view._library_generation = 3
+    view._load_library_row = lambda *_: None
+    view._library_edit = PiaScrapGUI._library_edit.__get__(view)
+    view.logger = SimpleNamespace(warning=lambda _: None)
+    view._library_jobs.put(("page", 1, str(tmp_path), ["Book"]))
+    view._library_jobs.put(("chapter", str(tmp_path), ["Book"], 1))
+    view._library_jobs.put(("page", 2, str(tmp_path), ["Book"]))
+    view._library_jobs.put(("labels", str(tmp_path), ["Book"], "Reading"))
+    view._library_jobs.put(("page", 3, str(tmp_path), ["Book"]))
+    threading.Thread(target=PiaScrapGUI._library_loader, args=(view,), daemon=True).start()
+    assert view.gui_queue.get(timeout=5) == ("library_edit_done", ("chapter", str(tmp_path), None))
+    assert view.gui_queue.get(timeout=5) == ("library_edit_done", ("labels", str(tmp_path), {"Book": "Reading"}))
+    assert reading_list.read_bookmark(str(folder)) == {"idx": 1, "episode_no": 101}
+    assert reading_list.read_labels(str(tmp_path)) == {"Book": "Reading"}
+
+
+def test_failed_label_batch_keeps_mapping_and_selection(tmp_path, monkeypatch):
+    from src import reading_list
+
+    reading_list.write_labels(str(tmp_path), {"A": "Reading", "B": "Reading"})
+    selected = ("row-0", "row-1")
+    view = SimpleNamespace(
+        move_var=SimpleNamespace(set=lambda _: None),
+        library_tree=SimpleNamespace(selection=lambda: selected),
+        output_entry=SimpleNamespace(get=lambda: str(tmp_path)),
+        _page_rows={"row-0": {"folder": "A"}, "row-1": {"folder": "B"}},
+        _library_jobs=queue.Queue(), gui_queue=queue.Queue(),
+    )
+    PiaScrapGUI._move_selected(view, "Completed")
+    def fail(*_):
+        raise OSError("disk full")
+    monkeypatch.setattr(reading_list, "write_labels", fail)
+    kind, *args = view._library_jobs.get_nowait()
+    PiaScrapGUI._library_edit(view, kind, *args)
+    assert view.gui_queue.get_nowait() == ("library_edit_error", ("Label", "disk full"))
+    assert view.library_tree.selection() == selected
+    assert reading_list.read_labels(str(tmp_path)) == {"A": "Reading", "B": "Reading"}

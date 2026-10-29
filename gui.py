@@ -103,6 +103,7 @@ class PiaScrapGUI(ctk.CTk):
         self.filtered_dirs = []
         self.label_filter = "All"
         self._label_map = {}
+        self._label_root = None
         self._labels_unreadable = False
         self._page_rows = {}
         self._library_generation = 0
@@ -316,8 +317,8 @@ class PiaScrapGUI(ctk.CTk):
         self.chapter_entry = ctk.CTkEntry(action_bar, width=72)
         self.chapter_entry.pack(side="left")
         self.chapter_entry.bind("<Return>", self._set_selected_chapter_event)
-        set_btn = ctk.CTkButton(action_bar, text="Set", width=52, command=self.set_selected_chapter, **secondary)
-        set_btn.pack(side="left", padx=(8, 0))
+        self.library_set_btn = ctk.CTkButton(action_bar, text="Set", width=52, state="disabled", command=self.set_selected_chapter, **secondary)
+        self.library_set_btn.pack(side="left", padx=(8, 0))
         update_actions = ctk.CTkFrame(action_bar, fg_color="transparent")
         update_actions.pack(side="right", padx=(16, 0))
         self.library_update_btn = ctk.CTkButton(
@@ -430,6 +431,11 @@ class PiaScrapGUI(ctk.CTk):
         """List book folders without reading metadata.json."""
         out_dir = self.output_entry.get().strip() or "output"
         self.library_dirs = list_local_book_directories(out_dir)
+        label_root = os.path.abspath(out_dir)
+        if label_root != self._label_root:
+            self._label_map = {}
+            self._label_root = label_root
+        self._library_jobs.put(("load_labels", out_dir, [], None))
         if self._search_after is not None:
             self.after_cancel(self._search_after)
             self._search_after = None
@@ -451,17 +457,7 @@ class PiaScrapGUI(ctk.CTk):
         self._apply_library_query(reset_page=True)
 
     def _labels_for_view(self, out_dir):
-        try:
-            labels = reading_list.read_labels(out_dir)
-        except reading_list.LabelsUnreadable:
-            if not self._labels_unreadable:
-                self.append_to_log(
-                    "[GUI-WARN] reading_labels.json could not be read. Labels stay hidden until that file is fixed."
-                )
-            self._labels_unreadable = True
-            return {}
-        self._labels_unreadable = False
-        return labels
+        return self._label_map
 
     def _filter_values(self, labels):
         custom = []
@@ -558,6 +554,10 @@ class PiaScrapGUI(ctk.CTk):
     def display_current_page(self):
         """Draw the visible page from memory. File reads run on the library worker."""
         self._hide_library_preview()
+        selected_folders = {
+            self._page_rows[row_id]["folder"] for row_id in self.library_tree.selection()
+            if row_id in self._page_rows
+        }
         self._library_generation += 1
         generation = self._library_generation
         self._page_rows = {}
@@ -588,12 +588,7 @@ class PiaScrapGUI(ctk.CTk):
         self.next_btn.configure(state="normal" if self.current_page < total_pages - 1 else "disabled")
 
         out_dir = self.output_entry.get().strip() or "output"
-        try:
-            labels = reading_list.read_labels(out_dir)
-        except reading_list.LabelsUnreadable:
-            labels = self._label_map
-        else:
-            self._label_map = labels
+        labels = self._label_map
 
         for index, item in enumerate(page_slice):
             row_id = f"row-{index}"
@@ -604,6 +599,7 @@ class PiaScrapGUI(ctk.CTk):
                     "novel_id": None,
                     "chapter_count": None,
                     "has_metadata": False,
+                    "has_chapters": False,
                     "progress_idx": "",
                 }
                 values = (item, "", "", "")
@@ -611,8 +607,12 @@ class PiaScrapGUI(ctk.CTk):
                 self._page_rows[row_id] = self._page_row_info(cached)
                 values = self._library_values(cached, labels)
             self.library_tree.insert("", "end", iid=row_id, values=values)
+        self.library_tree.selection_set([
+            row_id for row_id, info in self._page_rows.items()
+            if info["folder"] in selected_folders
+        ])
         self._on_library_select()
-        self._library_jobs.put((generation, out_dir, list(page_slice)))
+        self._library_jobs.put(("page", generation, out_dir, list(page_slice)))
 
     def _library_cache_id(self, out_dir, folder):
         return (os.path.abspath(out_dir), folder)
@@ -630,6 +630,7 @@ class PiaScrapGUI(ctk.CTk):
             "novel_id": row["novel_id"],
             "chapter_count": row["chapter_count"],
             "has_metadata": row["has_metadata"],
+            "has_chapters": row["has_chapters"],
             "progress_idx": row["progress_idx"],
         }
 
@@ -679,12 +680,12 @@ class PiaScrapGUI(ctk.CTk):
 
     def _library_loader(self):
         while True:
-            generation, out_dir, folders = self._library_jobs.get()
-            while True:
-                try:
-                    generation, out_dir, folders = self._library_jobs.get_nowait()
-                except queue.Empty:
-                    break
+            job = self._library_jobs.get()
+            kind, *args = job
+            if kind != "page":
+                self._library_edit(kind, *args)
+                continue
+            generation, out_dir, folders = args
             for folder in folders:
                 if generation != self._library_generation:
                     break
@@ -696,6 +697,30 @@ class PiaScrapGUI(ctk.CTk):
                     reading_list.flush_embedded_cache()
                 except OSError as exc:
                     self.logger.warning(f"Could not store the library progress cache: {exc}")
+
+    def _library_edit(self, kind, out_dir, folders, value):
+        try:
+            if kind == "labels":
+                labels = reading_list.set_labels(out_dir, folders, value)
+            elif kind == "load_labels":
+                labels = reading_list.read_labels(out_dir)
+            elif kind == "chapter":
+                book_dir = os.path.join(out_dir, folders[0])
+                line = reading_list.read_chapter_line(book_dir, value)
+                try:
+                    episode_no = int(line["episode_no"])
+                except (TypeError, KeyError, ValueError):
+                    raise ValueError("That chapter is not in this book.")
+                reading_list.write_bookmark(book_dir, value, episode_no)
+                with self._library_cache_lock:
+                    self._library_row_cache.pop(self._library_cache_id(out_dir, folders[0]), None)
+        except (OSError, reading_list.LabelsUnreadable, ValueError) as exc:
+            if kind == "load_labels":
+                self.gui_queue.put(("library_labels_unreadable", out_dir))
+                return
+            self.gui_queue.put(("library_edit_error", ("Label" if kind == "labels" else "Chapter", str(exc))))
+            return
+        self.gui_queue.put(("library_edit_done", (kind, out_dir, labels if kind in ("labels", "load_labels") else None)))
 
     def _load_library_row(self, out_dir, folder):
         book_dir = os.path.join(out_dir, folder)
@@ -710,6 +735,7 @@ class PiaScrapGUI(ctk.CTk):
             info = load_local_book_info(book_dir)
             progress_text, progress_idx = self._progress_line(book_dir)
             latest = self._latest_marker(book_dir, info)
+            first_chapter = reading_list.read_chapter_line(book_dir, 1)
             key = self._library_file_key(book_dir)
         except Exception as exc:
             self.logger.warning(f"Could not read library row {folder}: {exc}")
@@ -719,6 +745,7 @@ class PiaScrapGUI(ctk.CTk):
             "novel_id": info.novel_id,
             "chapter_count": info.chapter_count,
             "has_metadata": info.has_metadata,
+            "has_chapters": first_chapter is not None and first_chapter.get("episode_no") is not None,
             "progress_idx": progress_idx,
             "key": key,
             "title": info.title,
@@ -747,11 +774,7 @@ class PiaScrapGUI(ctk.CTk):
             break
         if touched is None or touched not in selected:
             return
-        if len(selected) == 1:
-            self._on_library_select()
-            return
-        state = "normal" if self._selected_novel_ids() else "disabled"
-        self.library_update_btn.configure(state=state)
+        self._update_library_actions()
 
     def prev_page(self):
         if self.current_page > 0:
@@ -881,11 +904,21 @@ class PiaScrapGUI(ctk.CTk):
 
     def _on_library_select(self, _event=None):
         selected = self.library_tree.selection()
-        self.chapter_entry.delete(0, "end")
-        if len(selected) == 1:
-            progress_idx = self._page_rows.get(selected[0], {}).get("progress_idx") or ""
-            if progress_idx:
-                self.chapter_entry.insert(0, progress_idx)
+        folders = frozenset(self._page_rows[row_id]["folder"] for row_id in selected if row_id in self._page_rows)
+        if folders != getattr(self, "_chapter_selection", frozenset()):
+            self._chapter_selection = folders
+            self.chapter_entry.delete(0, "end")
+            if len(selected) == 1:
+                progress_idx = self._page_rows.get(selected[0], {}).get("progress_idx") or ""
+                if progress_idx:
+                    self.chapter_entry.insert(0, progress_idx)
+        self._update_library_actions()
+
+    def _update_library_actions(self):
+        selected = self.library_tree.selection()
+        info = self._page_rows.get(selected[0], {}) if len(selected) == 1 else {}
+        ready = info.get("has_metadata") and (info.get("chapter_count") or 0) > 0 and info.get("has_chapters")
+        self.library_set_btn.configure(state="normal" if ready else "disabled")
         state = "normal" if self._selected_novel_ids() else "disabled"
         self.library_update_btn.configure(state=state)
 
@@ -911,16 +944,7 @@ class PiaScrapGUI(ctk.CTk):
             return
         out_dir = self.output_entry.get().strip() or "output"
         folders = [self._page_rows[name]["folder"] for name in selected if name in self._page_rows]
-        try:
-            for name in folders:
-                reading_list.set_label(out_dir, name, label)
-        except reading_list.LabelsUnreadable:
-            messagebox.showerror(
-                "Label",
-                "reading_labels.json could not be read, so it was left unchanged.",
-            )
-            return
-        self._apply_library_query(reset_page=False)
+        self._library_jobs.put(("labels", out_dir, folders, label))
 
     def _set_selected_chapter_event(self, _event):
         self.set_selected_chapter()
@@ -932,7 +956,7 @@ class PiaScrapGUI(ctk.CTk):
             messagebox.showerror("Chapter", "Select one novel.")
             return
         info = self._page_rows.get(selected[0])
-        if not info:
+        if not info or not info.get("has_metadata") or (info.get("chapter_count") or 0) <= 0 or not info.get("has_chapters"):
             return
         self.set_row_chapter(
             info["folder"],
@@ -950,7 +974,6 @@ class PiaScrapGUI(ctk.CTk):
 
     def set_row_chapter(self, folder_name, box, chapter_count, has_metadata):
         out_dir = self.output_entry.get().strip() or "output"
-        book_dir = os.path.join(out_dir, folder_name)
         raw = box.get().strip()
         try:
             idx = int(raw)
@@ -960,15 +983,7 @@ class PiaScrapGUI(ctk.CTk):
         if not has_metadata or chapter_count is None or idx < 1 or idx > chapter_count:
             messagebox.showerror("Chapter", "That chapter is not in this book.")
             return
-        line = reading_list.read_chapter_line(book_dir, idx)
-        episode_no = None if line is None else line.get("episode_no")
-        try:
-            episode_no = int(episode_no)
-        except (TypeError, ValueError):
-            messagebox.showerror("Chapter", "That chapter is not in this book.")
-            return
-        reading_list.write_bookmark(book_dir, idx, episode_no)
-        self.display_current_page()
+        self._library_jobs.put(("chapter", out_dir, [folder_name], idx))
 
     def trigger_library_update(self, novel_id):
         if not novel_id:
@@ -1185,6 +1200,23 @@ class PiaScrapGUI(ctk.CTk):
                 elif task == "library_row":
                     generation, row = data
                     self._apply_library_row(generation, row)
+                elif task == "library_edit_error":
+                    title, error = data
+                    messagebox.showerror(title, error)
+                elif task == "library_edit_done":
+                    kind, out_dir, labels = data
+                    if os.path.abspath(self.output_entry.get().strip() or "output") == os.path.abspath(out_dir):
+                        if kind in ("labels", "load_labels"):
+                            self._labels_unreadable = False
+                            self._label_map = labels
+                            self._apply_library_query(reset_page=False)
+                        else:
+                            self.display_current_page()
+                elif task == "library_labels_unreadable":
+                    if os.path.abspath(self.output_entry.get().strip() or "output") == os.path.abspath(data):
+                        if not self._labels_unreadable:
+                            self.append_to_log("[GUI-WARN] reading_labels.json could not be read. Labels stay hidden until that file is fixed.")
+                        self._labels_unreadable = True
                 elif task == "library_open_error":
                     messagebox.showerror("Open EPUB", data)
                 elif task == "library_preview":

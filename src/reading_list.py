@@ -5,6 +5,7 @@ import json
 import os
 import posixpath
 import re
+import threading
 import zipfile
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -27,6 +28,8 @@ _CFI_STEP = re.compile(r"/(\d+)")
 _EMBED_CACHE: Dict[tuple, Optional[Tuple[int, int, Optional[float]]]] = {}
 _DISK_MISS = object()
 _UNRESOLVED = object()
+_progress_lock = threading.RLock()
+_label_lock = threading.RLock()
 _disk_cache = {"path": None, "entries": {}, "dirty": False}
 
 
@@ -69,15 +72,25 @@ def write_labels(root: str, mapping: Dict[str, str]) -> None:
     write_json_atomic(_labels_path(root), mapping)
 
 
+def set_labels(root: str, folders, label: str) -> Dict[str, str]:
+    with _label_lock:
+        mapping = read_labels(root)
+        text = label.strip() if isinstance(label, str) else ""
+        for folder in folders:
+            if text:
+                mapping[folder] = text
+            else:
+                mapping.pop(folder, None)
+        write_labels(root, mapping)
+        return mapping
+
+
 def set_label(root: str, folder: str, label: str) -> Dict[str, str]:
-    mapping = read_labels(root)
-    text = label.strip() if isinstance(label, str) else ""
-    if text:
-        mapping[folder] = text
-    else:
-        mapping.pop(folder, None)
-    write_labels(root, mapping)
-    return mapping
+    return set_labels(root, [folder], label)
+
+
+def progress_transaction():
+    return _progress_lock
 
 
 def folders_for_label(mapping: Dict[str, str], label: str) -> List[str]:
@@ -104,17 +117,19 @@ def read_bookmark(folder: str) -> Optional[Dict[str, int]]:
 
 
 def write_bookmark(folder: str, idx: int, episode_no: int) -> None:
-    write_json_atomic(
-        _bookmark_path(folder),
-        {"idx": int(idx), "episode_no": int(episode_no)},
-    )
+    with progress_transaction():
+        write_json_atomic(
+            _bookmark_path(folder),
+            {"idx": int(idx), "episode_no": int(episode_no)},
+        )
 
 
 def clear_bookmark(folder: str) -> None:
-    try:
-        os.remove(_bookmark_path(folder))
-    except FileNotFoundError:
-        pass
+    with progress_transaction():
+        try:
+            os.remove(_bookmark_path(folder))
+        except FileNotFoundError:
+            pass
 
 
 def read_chapter_line(folder: str, idx: int) -> Optional[dict]:
@@ -160,7 +175,9 @@ def resolve_bookmark(folder: str, bookmark: Optional[Dict[str, int]]):
     title = str(found.get("title") or "")
     if found_idx != hinted_idx:
         # episode_no is the marked viewer chapter when an earlier insert renumbers idx.
-        write_bookmark(folder, found_idx, episode_no)
+        with progress_transaction():
+            if read_bookmark(folder) == bookmark:
+                write_bookmark(folder, found_idx, episode_no)
     return found_idx, episode_no, title
 
 
@@ -229,13 +246,14 @@ def sync_embedded_progress(folder: str) -> Optional[Dict[str, int]]:
     if located is None:
         return None
     idx, episode_no, timestamp = located
-    current = read_bookmark(folder)
-    if current == {"idx": idx, "episode_no": episode_no}:
-        return current
-    if current is not None and not _embedded_is_newer(folder, timestamp):
-        return None
-    write_bookmark(folder, idx, episode_no)
-    return {"idx": idx, "episode_no": episode_no}
+    with progress_transaction():
+        current = read_bookmark(folder)
+        if current == {"idx": idx, "episode_no": episode_no}:
+            return current
+        if current is not None and not _embedded_is_newer(folder, timestamp):
+            return None
+        write_bookmark(folder, idx, episode_no)
+        return {"idx": idx, "episode_no": episode_no}
 
 
 def _embedded_is_newer(folder: str, timestamp: Optional[float]) -> bool:

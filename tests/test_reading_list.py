@@ -342,3 +342,62 @@ def test_unreadable_epub_is_tried_again_on_the_next_launch(tmp_path):
 
     saved = json.loads((folder / "calibre_bookmarks.txt").read_text(encoding="utf-8"))
     assert saved == {"idx": 2, "episode_no": 200}
+
+
+def test_sync_does_not_overwrite_a_concurrent_manual_bookmark(tmp_path, monkeypatch):
+    import threading
+
+    reading_list.write_bookmark(str(tmp_path), 1, 101)
+    monkeypatch.setattr(reading_list, "_locate_embedded_progress", lambda _: (2, 102, 9999999999))
+    entered, release, manual_started = threading.Event(), threading.Event(), threading.Event()
+    original = reading_list.write_bookmark
+
+    def paused_write(folder, idx, episode_no):
+        if idx == 2:
+            entered.set()
+            assert release.wait(5)
+        original(folder, idx, episode_no)
+
+    monkeypatch.setattr(reading_list, "write_bookmark", paused_write)
+    sync = threading.Thread(target=reading_list.sync_embedded_progress, args=(str(tmp_path),))
+    sync.start()
+    assert entered.wait(5)
+
+    def manual():
+        manual_started.set()
+        reading_list.write_bookmark(str(tmp_path), 3, 103)
+
+    edit = threading.Thread(target=manual)
+    edit.start()
+    assert manual_started.wait(5)
+    edit.join(0.2)
+    release.set()
+    sync.join(5)
+    edit.join(5)
+    assert reading_list.read_bookmark(str(tmp_path)) == {"idx": 3, "episode_no": 103}
+
+
+def test_batch_labels_write_once_and_leave_existing_map_on_failure(tmp_path, monkeypatch):
+    reading_list.write_labels(str(tmp_path), {"A": "Reading", "B": "Reading"})
+    before = (tmp_path / "reading_labels.json").read_bytes()
+    def fail(root, mapping):
+        assert mapping == {"A": "Completed", "B": "Completed"}
+        raise OSError("disk full")
+    monkeypatch.setattr(reading_list, "write_labels", fail)
+    with pytest.raises(OSError):
+        reading_list.set_labels(str(tmp_path), ["A", "B"], "Completed")
+    assert (tmp_path / "reading_labels.json").read_bytes() == before
+
+
+def test_batch_labels_updates_every_folder_in_one_write(tmp_path, monkeypatch):
+    reading_list.write_labels(str(tmp_path), {"A": "Reading", "B": "Reading", "C": "Dropped"})
+    original = reading_list.write_labels
+    written = []
+    def record(root, mapping):
+        written.append(dict(mapping))
+        original(root, mapping)
+    monkeypatch.setattr(reading_list, "write_labels", record)
+    reading_list.set_labels(str(tmp_path), ["A", "B"], "Completed")
+    expected = {"A": "Completed", "B": "Completed", "C": "Dropped"}
+    assert written == [expected]
+    assert reading_list.read_labels(str(tmp_path)) == expected
