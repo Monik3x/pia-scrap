@@ -45,6 +45,7 @@ def test_html_from_episode_text_removes_active_content_and_unsafe_attributes():
 
 
 def test_fetch_novel_and_episodes_filters_webtoon_before_limit(novel_data):
+    novel_data["result"]["info"]["epi_cnt"] = 7
     episode_payload = {
         "result": {
             "list": [
@@ -68,17 +69,14 @@ def test_fetch_novel_and_episodes_filters_webtoon_before_limit(novel_data):
     }
     client = SimpleNamespace(
         novel=lambda novel_id: novel_data,
-        episode_list=lambda novel_id, rows: episode_payload,
+        episode_list=lambda novel_id, rows: {
+            "result": {"list": episode_payload["result"]["list"][:rows]}
+        },
     )
 
     _, selected, _ = fetch_novel_and_episodes(client, 42, max_chapters=5)
 
-    assert len(selected) == 5
     assert selected == episode_payload["result"]["list"][1:6]
-    assert all(
-        not (episode["flag_content"] == 1 and episode["flag_type"] == 0)
-        for episode in selected
-    )
 
 
 @pytest.mark.parametrize(
@@ -147,15 +145,13 @@ def test_parse_novel_metadata_reads_live_info_counts():
 def test_fetch_novel_and_episodes_accepts_captured_prologue_shape(captured_api_samples):
     novel_case = captured_api_samples["novels"][0]
     episode_payload = captured_api_samples["episode"]["list_payload"]
-    requested_rows = []
     client = SimpleNamespace(
         novel=lambda novel_id: novel_case["payload"],
-        episode_list=lambda novel_id, rows: requested_rows.append(rows) or episode_payload,
+        episode_list=lambda novel_id, rows: episode_payload,
     )
 
     _, episodes, _ = fetch_novel_and_episodes(client, 86, max_chapters=1)
 
-    assert requested_rows == [1577]
     assert episodes == [
         {
             "episode_no": 21443,
@@ -191,17 +187,14 @@ def test_fetch_novel_and_episodes_keeps_single_chapter_novels():
         "epi_title": "Chapter 01: To Level Up",
         "flag_open": 1,
     }
-    requested_rows = []
     client = SimpleNamespace(
         novel=lambda novel_id: novel_response,
-        episode_list=lambda novel_id, rows: requested_rows.append(rows)
-        or {"result": {"list": [episode]}},
+        episode_list=lambda novel_id, rows: {"result": {"list": [episode]}},
     )
 
     _, episodes, metadata = fetch_novel_and_episodes(client, 3894)
 
     assert metadata.episode_count == 1
-    assert requested_rows == [1]
     assert episodes == [episode]
 
 

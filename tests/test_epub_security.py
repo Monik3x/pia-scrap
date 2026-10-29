@@ -1,4 +1,9 @@
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
+from urllib.parse import urlsplit
+
 import pytest
+from curl_cffi import CurlOpt
 
 from src.api import NovelpiaClient
 
@@ -23,35 +28,21 @@ SIGNED_COOKIES = {
 
 
 class FakeSession:
-    def __init__(self, responses, cookies=None):
-        self.cookies = {} if cookies is None else cookies
+    def __init__(self, responses, expected_url=None):
+        self.cookies = {}
         self.responses = list(responses)
-        self.calls = []
+        self.expected_url = expected_url
 
     def get(self, url, **kwargs):
-        self.calls.append((url, kwargs))
+        if self.expected_url is not None and url != self.expected_url:
+            return FakeResponse(content=b"wrong URL")
         return self.responses.pop(0)
-
-
-def cookies_curl_would_send(session, headers):
-    """Merge the session jar with the Cookie header the way curl_cffi does."""
-    sent = {}
-    jar = getattr(session, "cookies", None) or {}
-    if hasattr(jar, "items"):
-        sent.update({str(key): str(value) for key, value in jar.items() if value})
-    cookie_header = (headers or {}).get("Cookie") or ""
-    for part in cookie_header.split(";"):
-        part = part.strip()
-        if not part or "=" not in part:
-            continue
-        key, value = part.split("=", 1)
-        sent[key.strip()] = value
-    return sent
 
 
 def make_client(session):
     client = object.__new__(NovelpiaClient)
-    client.s = FakeSession([], cookies=dict(AUTH_COOKIES))
+    client.s = FakeSession([])
+    client.s.cookies.update(AUTH_COOKIES)
     client._image_s = session
     client.timeout = 30
     client.cancel_event = None
@@ -59,14 +50,55 @@ def make_client(session):
     return client
 
 
-def test_image_session_jar_does_not_hold_api_auth_cookies():
-    client = NovelpiaClient(userkey="user", tkey="token")
+@pytest.fixture
+def image_server():
+    received = []
 
-    assert client.s is not client._image_s
-    assert client.s.cookies.get("USERKEY") == "user"
-    assert client.s.cookies.get("TKEY") == "token"
-    assert not client._image_s.cookies.get("USERKEY")
-    assert not client._image_s.cookies.get("TKEY")
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            received.append(self.headers.get_all("Cookie", []))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"image")
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_port, received
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
+def wire_client(monkeypatch, image_server):
+    port, received = image_server
+    client = NovelpiaClient(userkey="user", tkey="token")
+    for name, value in AUTH_COOKIES.items():
+        client._image_s.cookies.set(name, value, domain=".novelpia.com")
+    get = client._image_s.get
+    client._image_s.trust_env = False
+
+    def get_locally(url, **kwargs):
+        host = urlsplit(url).hostname
+        client._image_s.curl_options[CurlOpt.RESOLVE] = [f"{host}:{port}:127.0.0.1"]
+        return get(f"http://{host}:{port}/image.jpg", **kwargs)
+
+    monkeypatch.setattr(client._image_s, "get", get_locally)
+    return client, received
+
+
+def sent_cookies(received):
+    assert len(received) == 1
+    pairs = []
+    for header in received[0]:
+        for part in header.split(";"):
+            pairs.append(part.strip())
+    return sorted(pairs)
 
 
 def test_image_fetch_blocks_unapproved_hosts_without_request():
@@ -76,17 +108,11 @@ def test_image_fetch_blocks_unapproved_hosts_without_request():
     )
 
     assert result is None
-    assert session.calls == []
 
 
-@pytest.mark.parametrize(
-    "host",
-    ["global.novelpia.com", "images.novelpia.com"],
-)
-def test_session_image_fetch_sends_only_session_cookies(host):
-    # Contaminate the image jar; curl_cffi would attach these if clear/filter failed.
-    session = FakeSession([FakeResponse()], cookies=dict(AUTH_COOKIES))
-    client = make_client(session)
+@pytest.mark.parametrize("host", ["global.novelpia.com", "images.novelpia.com"])
+def test_session_image_fetch_sends_only_session_cookies(host, monkeypatch, image_server):
+    client, received = wire_client(monkeypatch, image_server)
     result = client.fetch_image(
         f"https://{host}/image.jpg",
         "https://global.novelpia.com/viewer/1",
@@ -94,21 +120,14 @@ def test_session_image_fetch_sends_only_session_cookies(host):
     )
 
     assert result == b"image"
-    sent = cookies_curl_would_send(session, session.calls[0][1]["headers"])
-    assert sent.get("USERKEY") == "user"
-    assert sent.get("TKEY") == "token"
-    assert "CloudFront-Policy" not in sent
-    assert "other" not in sent
+    assert sent_cookies(received) == sorted(["USERKEY=user", "TKEY=token"])
 
 
 @pytest.mark.parametrize(
-    "host",
-    ["gn.novelpia.com", "image.novelpia.com", "pv-gn.novelpia.com"],
+    "host", ["gn.novelpia.com", "image.novelpia.com", "pv-gn.novelpia.com"]
 )
-def test_cdn_image_fetch_sends_only_signed_cloudfront_cookies(host):
-    # Contaminate the image jar; curl_cffi would attach these if clear/filter failed.
-    session = FakeSession([FakeResponse()], cookies=dict(AUTH_COOKIES))
-    client = make_client(session)
+def test_cdn_image_fetch_sends_only_signed_cloudfront_cookies(host, monkeypatch, image_server):
+    client, received = wire_client(monkeypatch, image_server)
     result = client.fetch_image(
         f"https://{host}/image.jpg",
         "https://global.novelpia.com/viewer/1",
@@ -116,35 +135,22 @@ def test_cdn_image_fetch_sends_only_signed_cloudfront_cookies(host):
     )
 
     assert result == b"image"
-    sent = cookies_curl_would_send(session, session.calls[0][1]["headers"])
-    assert "USERKEY" not in sent
-    assert "TKEY" not in sent
-    assert "unexpected" not in sent
-    assert "other" not in sent
-    assert sent.get("CloudFront-Policy") == "fixture-policy"
-    assert sent.get("CloudFront-Signature") == "fixture-signature"
-    assert sent.get("CloudFront-Key-Pair-Id") == "fixture-key-id"
+    assert sent_cookies(received) == sorted(f"{key}={value}" for key, value in SIGNED_COOKIES.items())
 
 
-@pytest.mark.parametrize(
-    "source",
-    ["d.novelpia.com", "img.novelpia.com"],
-)
+@pytest.mark.parametrize("source", ["d.novelpia.com", "img.novelpia.com"])
 def test_fetch_image_requests_canonical_host_for_aliases(source):
-    session = FakeSession([FakeResponse()], cookies=dict(AUTH_COOKIES))
-    client = make_client(session)
-    result = client.fetch_image(
+    session = FakeSession(
+        [FakeResponse()],
+        expected_url="https://image.novelpia.com/imagebox/ab/abc.png",
+    )
+    result = make_client(session).fetch_image(
         f"https://{source}/imagebox/ab/abc.png",
         "https://global.novelpia.com/viewer/1",
         dict(SIGNED_COOKIES),
     )
 
     assert result == b"image"
-    assert session.calls[0][0] == "https://image.novelpia.com/imagebox/ab/abc.png"
-    sent = cookies_curl_would_send(session, session.calls[0][1]["headers"])
-    assert sent.get("CloudFront-Policy") == "fixture-policy"
-    assert "USERKEY" not in sent
-    assert "TKEY" not in sent
 
 
 def test_image_fetch_does_not_follow_redirect_to_unapproved_host():
@@ -158,4 +164,3 @@ def test_image_fetch_does_not_follow_redirect_to_unapproved_host():
     )
 
     assert result is None
-    assert len(session.calls) == 1

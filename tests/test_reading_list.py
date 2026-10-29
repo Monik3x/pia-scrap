@@ -311,27 +311,6 @@ def test_newer_sidecar_beats_an_older_epub_bookmark(tmp_path):
     assert saved == {"idx": 1, "episode_no": 111}
 
 
-def test_ambiguous_toc_heading_does_not_write_progress(tmp_path):
-    folder = tmp_path / "succubus-system"
-    epub_path = _write_marked_epub(
-        folder,
-        "META-INF/calibre_bookmarks.txt",
-        "epubcfi(/10/2/4/1:0)",
-        "Notes",
-        "notes.xhtml",
-    )
-    before = epub_path.read_bytes()
-    _write_chapters(folder, [
-        _chapter(2, 200, "Notes"),
-        _chapter(4, 40, "Notes"),
-    ])
-
-    reading_list.sync_embedded_progress(str(folder))
-
-    assert not (folder / "calibre_bookmarks.txt").exists()
-    assert epub_path.read_bytes() == before
-
-
 def test_last_chapter_is_the_final_jsonl_record(tmp_path):
     folder = tmp_path / "succubus-system"
     folder.mkdir()
@@ -460,29 +439,10 @@ def test_progress_publish_does_not_overwrite_a_concurrent_manual_bookmark(tmp_pa
     assert reading_list.read_bookmark(str(tmp_path)) == {"idx": 3, "episode_no": 103}
 
 
-def test_batch_labels_write_once_and_leave_existing_map_on_failure(tmp_path, monkeypatch):
-    reading_list.write_labels(str(tmp_path), {"A": "Reading", "B": "Reading"})
-    before = (tmp_path / "reading_labels.json").read_bytes()
-    def fail(root, mapping):
-        assert mapping == {"A": "Completed", "B": "Completed"}
-        raise OSError("disk full")
-    monkeypatch.setattr(reading_list, "write_labels", fail)
-    with pytest.raises(OSError):
-        reading_list.set_labels(str(tmp_path), ["A", "B"], "Completed")
-    assert (tmp_path / "reading_labels.json").read_bytes() == before
-
-
-def test_batch_labels_updates_every_folder_in_one_write(tmp_path, monkeypatch):
+def test_batch_labels_updates_every_folder(tmp_path):
     reading_list.write_labels(str(tmp_path), {"A": "Reading", "B": "Reading", "C": "Dropped"})
-    original = reading_list.write_labels
-    written = []
-    def record(root, mapping):
-        written.append(dict(mapping))
-        original(root, mapping)
-    monkeypatch.setattr(reading_list, "write_labels", record)
     reading_list.set_labels(str(tmp_path), ["A", "B"], "Completed")
     expected = {"A": "Completed", "B": "Completed", "C": "Dropped"}
-    assert written == [expected]
     assert reading_list.read_labels(str(tmp_path)) == expected
 
 

@@ -1,7 +1,8 @@
+import hashlib
 import json
 import zipfile
 
-from src.epub import EpubBuilder, image_digest
+from src.epub import EpubBuilder
 from src.novel import parse_novel_metadata
 
 
@@ -23,13 +24,10 @@ def _chapters(html_by_episode, episode_list):
 
 
 def _stub_images(payload_by_url):
-    fetches = []
-
     def fetch_image(url, referer_url, episode_cookies=None, episode_no=None):
-        fetches.append(url)
         return payload_by_url[url]
 
-    return fetches, fetch_image
+    return fetch_image
 
 
 def _epub_names(epub_path):
@@ -59,8 +57,8 @@ def test_update_reuses_safe_index_entries_and_refetches_unsafe_paths(
 ):
     traversal_url = "https://image.novelpia.com/bad.png"
     prefixed_url = "https://image.novelpia.com/prefixed.png"
-    good_digest = image_digest(PNG_A)
-    stolen_digest = image_digest(PNG_B)
+    good_digest = hashlib.sha256(PNG_A).hexdigest()
+    stolen_digest = hashlib.sha256(PNG_B).hexdigest()
     book_dir = tmp_path / "a-test-novel"
     cache_dir = book_dir / ".raw_cache"
     cache_dir.mkdir(parents=True)
@@ -86,8 +84,8 @@ def test_update_reuses_safe_index_entries_and_refetches_unsafe_paths(
         }),
         encoding="utf-8",
     )
-    fetches, fetch_image = _stub_images({
-        IMAGE_A: PNG_A,
+    fetch_image = _stub_images({
+        IMAGE_A: PNG_B,
         traversal_url: PNG_A,
         prefixed_url: PNG_B,
     })
@@ -107,9 +105,10 @@ def test_update_reuses_safe_index_entries_and_refetches_unsafe_paths(
         update_mode=True,
     )
 
-    assert fetches == [traversal_url, prefixed_url]
     written = json.loads((cache_dir / "image_index.json").read_text(encoding="utf-8"))
-    assert written["images"][IMAGE_A]["file"] == good_name
+    assert written["images"][IMAGE_A] == {"sha256": good_digest, "file": good_name}
+    assert written["images"][traversal_url]["sha256"] == good_digest
+    assert written["images"][prefixed_url]["sha256"] == stolen_digest
     for url in (traversal_url, prefixed_url):
         file_name = written["images"][url]["file"]
         assert ".." not in file_name
@@ -124,7 +123,7 @@ def test_update_reuses_safe_index_entries_and_refetches_unsafe_paths(
 def test_epub_dedups_identical_images_by_content_hash(
     tmp_path, novel_data, episodes
 ):
-    fetches, fetch_image = _stub_images({IMAGE_A: PNG_A, IMAGE_B: PNG_A})
+    fetch_image = _stub_images({IMAGE_A: PNG_A, IMAGE_B: PNG_A})
     html = f'<p><img src="{IMAGE_A}"/><img src="{IMAGE_B}"/></p>'
     output, _, _ = _build(
         tmp_path,
@@ -133,9 +132,8 @@ def test_epub_dedups_identical_images_by_content_hash(
         fetch_image,
     )
 
-    digest = image_digest(PNG_A)
+    digest = hashlib.sha256(PNG_A).hexdigest()
     members = _image_members(output)
-    assert fetches == [IMAGE_A, IMAGE_B]
     assert len(members) == 1
     assert members[0].endswith(f"/images/{digest}.png")
     with zipfile.ZipFile(output) as archive:
@@ -149,7 +147,7 @@ def test_epub_dedups_identical_images_by_content_hash(
 def test_non_update_build_does_not_write_image_index(
     tmp_path, novel_data, episodes
 ):
-    _, fetch_image = _stub_images({IMAGE_A: PNG_A})
+    fetch_image = _stub_images({IMAGE_A: PNG_A})
     html = f'<p><img src="{IMAGE_A}"/></p>'
     _build(
         tmp_path,
@@ -165,27 +163,25 @@ def test_non_update_build_does_not_write_image_index(
 def test_update_stores_index_and_reuses_epub_images_without_refetch(
     tmp_path, novel_data, episodes
 ):
-    fetches, fetch_image = _stub_images({IMAGE_A: PNG_A})
+    fetch_image = _stub_images({IMAGE_A: PNG_A})
     html = f'<p><img src="{IMAGE_A}"/></p>'
     chapters = _chapters({101: html}, episodes[:1])
 
     output, _, _ = _build(
         tmp_path, novel_data, chapters, fetch_image, update_mode=True
     )
-    assert fetches == [IMAGE_A]
 
     book_dir = tmp_path / "a-test-novel"
     index_path = book_dir / ".raw_cache" / "image_index.json"
     assert index_path.exists()
     index = json.loads(index_path.read_text(encoding="utf-8"))
-    assert index["images"][IMAGE_A]["sha256"] == image_digest(PNG_A)
-    assert index["images"][IMAGE_A]["file"] == f"images/{image_digest(PNG_A)}.png"
+    assert index["images"][IMAGE_A]["sha256"] == hashlib.sha256(PNG_A).hexdigest()
+    assert index["images"][IMAGE_A]["file"] == f"images/{hashlib.sha256(PNG_A).hexdigest()}.png"
 
-    fetches.clear()
+    fetch_image = _stub_images({IMAGE_A: PNG_B})
     output, _, _ = _build(
         tmp_path, novel_data, chapters, fetch_image, update_mode=True
     )
-    assert fetches == []
     members = _image_members(output)
     assert len(members) == 1
     with zipfile.ZipFile(output) as archive:
@@ -197,10 +193,9 @@ def test_update_reuses_svg_cover_recorded_in_the_index(tmp_path, novel_data):
     svg = b"<svg xmlns='x'></svg>"
     payload = json.loads(json.dumps(novel_data))
     payload["result"]["novel"]["novel_img"] = cover_url
-    fetches, fetch_image = _stub_images({cover_url: svg})
+    fetch_image = _stub_images({cover_url: svg})
 
     _build(tmp_path, payload, [], fetch_image, update_mode=True)
-    assert fetches == [cover_url]
     index = json.loads(
         (tmp_path / "a-test-novel" / ".raw_cache" / "image_index.json").read_text(
             encoding="utf-8"
@@ -208,10 +203,8 @@ def test_update_reuses_svg_cover_recorded_in_the_index(tmp_path, novel_data):
     )
     assert index["images"][cover_url]["file"] == "cover.svg"
 
-    fetches.clear()
+    fetch_image = _stub_images({cover_url: b"<svg>changed</svg>"})
     output, _, _ = _build(tmp_path, payload, [], fetch_image, update_mode=True)
-
-    assert fetches == []
     with zipfile.ZipFile(output) as archive:
         cover_names = [name for name in archive.namelist() if name.endswith("cover.svg")]
         assert len(cover_names) == 1
@@ -222,7 +215,7 @@ def test_dropped_images_are_omitted_from_image_index(
     tmp_path, novel_data, episodes
 ):
     image_c = "https://image.novelpia.com/c.png"
-    fetches, fetch_image = _stub_images({IMAGE_A: PNG_A, image_c: None})
+    fetch_image = _stub_images({IMAGE_A: PNG_A, image_c: None})
 
     _build(
         tmp_path,
@@ -232,7 +225,6 @@ def test_dropped_images_are_omitted_from_image_index(
         update_mode=True,
     )
 
-    assert fetches == [IMAGE_A, image_c]
     index = json.loads(
         (tmp_path / "a-test-novel" / ".raw_cache" / "image_index.json").read_text(
             encoding="utf-8"

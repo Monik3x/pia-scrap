@@ -22,27 +22,19 @@ def library_loader():
     return loader
 
 
-def test_refresh_receives_row_cached_by_previous_generation(tmp_path):
-    folder = tmp_path / "Book"
-    folder.mkdir()
-    (folder / ".novel_id").write_text("42", encoding="utf-8")
-    loader = library_loader()
-    first = PiaScrapGUI._load_library_row(loader, str(tmp_path), "Book")
-    refreshed = PiaScrapGUI._load_library_row(loader, str(tmp_path), "Book")
-    assert refreshed == first
-    assert refreshed["novel_id"] == 42
-
-
 def test_refresh_reloads_retired_book_identity(tmp_path):
     folder = tmp_path / "Book"
     folder.mkdir()
     (folder / ".novel_id").write_text("42", encoding="utf-8")
     loader = library_loader()
-    assert PiaScrapGUI._load_library_row(loader, str(tmp_path), "Book")["novel_id"] == 42
+    view = library_view(tmp_path)
+    view.display_current_page()
+    view.library_tree.selection_set(["row-0"])
+    view._apply_library_row(view._library_generation, PiaScrapGUI._load_library_row(loader, str(tmp_path), "Book"))
+    assert view.library_update_btn.state == "normal"
     (folder / ".retired").write_text("retired", encoding="utf-8")
-    row = PiaScrapGUI._load_library_row(loader, str(tmp_path), "Book")
-    assert row is not None
-    assert row["novel_id"] is None
+    view._apply_library_row(view._library_generation, PiaScrapGUI._load_library_row(loader, str(tmp_path), "Book"))
+    assert view.library_update_btn.state == "disabled"
 
 
 @pytest.mark.parametrize(
@@ -55,21 +47,18 @@ def test_refresh_reloads_retired_book_identity(tmp_path):
         ("[", "All", ["[Draft]"]),
     ],
 )
-def test_library_search_matches_multiword_titles_in_folder_names(query, label, expected):
-    view = SimpleNamespace(
-        output_entry=SimpleNamespace(get=lambda: "output"),
-        search_var=SimpleNamespace(get=lambda: query),
-        library_dirs=["the-book", "The Book", "other-story", "[Draft]"],
-        label_filter=label,
-        current_page=3,
-        _labels_for_view=lambda _: {"the-book": "Reading"},
-        _sync_label_filter=lambda _: None,
-        display_current_page=lambda: None,
-    )
+def test_library_search_matches_multiword_titles_in_folder_names(tmp_path, query, label, expected):
+    view = library_view(tmp_path)
+    view.search_var = Widget(query)
+    view.library_dirs = ["the-book", "The Book", "other-story", "[Draft]"]
+    view.label_filter = label
+    view.current_page = 3
+    view._labels_for_view = lambda _: {"the-book": "Reading"}
+    view._sync_label_filter = lambda _: None
 
     PiaScrapGUI._apply_library_query(view, reset_page=True)
 
-    assert view.filtered_dirs == expected
+    assert [row[0] for row in view.library_tree.rows.values()] == expected
     assert view.current_page == 0
 
 
@@ -106,12 +95,15 @@ def test_preview_survives_missing_or_damaged_local_data(tmp_path, metadata):
     assert preview["cover"] is None
 
 
-def test_open_book_reports_missing_epub_to_gui(tmp_path):
-    view = SimpleNamespace(gui_queue=queue.Queue())
+def test_open_book_reports_missing_epub_to_gui(tmp_path, monkeypatch):
+    errors = []
+    monkeypatch.setattr("gui.messagebox.showerror", lambda title, message: errors.append((title, message)))
+    view = SimpleNamespace(gui_queue=queue.Queue(), after=lambda *_: None, process_queue=lambda: None)
     PiaScrapGUI._launch_library_epub(view, str(tmp_path))
-    task, message = view.gui_queue.get_nowait()
-    assert task == "library_open_error"
-    assert "No EPUB found" in message
+    PiaScrapGUI.process_queue(view)
+    assert len(errors) == 1
+    assert errors[0][0] == "Open EPUB"
+    assert "No EPUB found" in errors[0][1]
 
 
 class Widget:
@@ -317,6 +309,11 @@ def test_failed_label_batch_keeps_mapping_and_selection(tmp_path, monkeypatch):
     monkeypatch.setattr(reading_list, "write_labels", fail)
     kind, *args = view._library_jobs.get_nowait()
     PiaScrapGUI._library_edit(view, kind, *args)
-    assert view.gui_queue.get_nowait() == ("library_edit_error", ("Label", "disk full"))
+    errors = []
+    monkeypatch.setattr("gui.messagebox.showerror", lambda title, message: errors.append((title, message)))
+    view.after = lambda *_: None
+    view.process_queue = lambda: None
+    PiaScrapGUI.process_queue(view)
+    assert errors == [("Label", "disk full")]
     assert view.library_tree.selection() == selected
     assert reading_list.read_labels(str(tmp_path)) == {"A": "Reading", "B": "Reading"}

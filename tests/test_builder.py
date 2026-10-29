@@ -496,9 +496,10 @@ def test_update_retry_after_cancel_reuses_cached_book_dir(
     assert not (tmp_path / "a-test-novel-42").exists()
 
 
-def test_load_or_fetch_omits_signed_key_from_written_cache(tmp_path, episodes):
-    cache_dir = tmp_path / ".raw_cache"
-    cache_dir.mkdir()
+def test_build_txt_omits_signed_key_from_written_cache(monkeypatch, tmp_path, novel_data, episodes):
+    monkeypatch.setattr(builder, "fetch_novel_and_episodes",
+                        lambda *a, **k: (novel_data, episodes[:1], _metadata(novel_data)))
+    cache_dir = tmp_path / "a-test-novel" / ".raw_cache"
     signed_key = {
         "CloudFront-Policy": "fixture-policy",
         "CloudFront-Key-Pair-Id": "fixture-key-id",
@@ -511,11 +512,8 @@ def test_load_or_fetch_omits_signed_key_from_written_cache(tmp_path, episodes):
         "signed_key": signed_key,
     }])
 
-    results = builder._load_or_fetch_episodes(
-        client, episodes[:1], str(cache_dir), update_mode=True
-    )
+    builder.build_txt(client, 42, str(tmp_path), update_mode=True)
 
-    assert results[0]["signed_key"] == signed_key
     cached = json.loads((cache_dir / "101.json").read_text(encoding="utf-8"))
     assert "signed_key" not in cached
     assert cached["html"] == "<p>fresh</p>"
@@ -551,11 +549,12 @@ def test_load_or_fetch_strips_signed_key_from_cache_hits(tmp_path, episodes):
     assert "signed_key" not in results[0]
 
 
-def test_load_or_fetch_caches_successful_episodes_when_a_later_fetch_fails(
-    tmp_path, episodes
+def test_build_txt_caches_successful_episodes_when_a_later_fetch_fails(
+    monkeypatch, tmp_path, novel_data, episodes
 ):
-    cache_dir = tmp_path / ".raw_cache"
-    cache_dir.mkdir()
+    monkeypatch.setattr(builder, "fetch_novel_and_episodes",
+                        lambda *a, **k: (novel_data, episodes, _metadata(novel_data)))
+    cache_dir = tmp_path / "a-test-novel" / ".raw_cache"
     client = DummyFetchClient([
         {
             "html": "<p>ok</p>",
@@ -565,23 +564,24 @@ def test_load_or_fetch_caches_successful_episodes_when_a_later_fetch_fails(
         {"error": "denied", "epi_no": 102},
     ])
 
-    results = builder._load_or_fetch_episodes(
-        client, episodes, str(cache_dir), update_mode=True
-    )
+    with pytest.raises(RuntimeError, match="No TXT files were written"):
+        builder.build_txt(client, 42, str(tmp_path), update_mode=True)
 
-    assert results[0]["html"] == "<p>ok</p>"
-    assert "error" in results[1]
     first_cache = json.loads((cache_dir / "101.json").read_text(encoding="utf-8"))
     assert first_cache["html"] == "<p>ok</p>"
     assert first_cache["flag_detail_trans"] == 2
     assert not (cache_dir / "102.json").exists()
 
 
-def test_load_or_fetch_reuses_only_raw_cache_with_matching_episode_revision(
-    tmp_path, episodes
+def test_build_txt_reuses_only_raw_cache_with_matching_episode_revision(
+    monkeypatch, tmp_path, novel_data, episodes
 ):
-    cache_dir = tmp_path / ".raw_cache"
-    cache_dir.mkdir()
+    monkeypatch.setattr(builder, "fetch_novel_and_episodes",
+                        lambda *a, **k: (novel_data, episodes, _metadata(novel_data)))
+    book_dir = tmp_path / "a-test-novel"
+    cache_dir = book_dir / ".raw_cache"
+    cache_dir.mkdir(parents=True)
+    (book_dir / ".novel_id").write_text("42", encoding="ascii")
     for episode, revision in zip(episodes, (2, 3)):
         (cache_dir / f"{episode['episode_no']}.json").write_text(
             json.dumps({
@@ -598,13 +598,10 @@ def test_load_or_fetch_reuses_only_raw_cache_with_matching_episode_revision(
         "epi_title": episodes[1]["epi_title"],
     }])
 
-    results = builder._load_or_fetch_episodes(
-        client, episodes, str(cache_dir), update_mode=True
-    )
+    builder.build_txt(client, 42, str(tmp_path), update_mode=True)
 
-    assert client.fetched == episodes[1:]
-    assert results[0]["html"] == "<p>cached 101</p>"
-    assert results[1]["html"] == "<p>fresh second</p>"
+    assert (book_dir / "1_First _ Chapter.txt").read_text(encoding="utf-8") == "cached 101"
+    assert (book_dir / "2_Second Chapter.txt").read_text(encoding="utf-8") == "fresh second"
     first_cache = json.loads((cache_dir / "101.json").read_text(encoding="utf-8"))
     second_cache = json.loads((cache_dir / "102.json").read_text(encoding="utf-8"))
     assert first_cache["html"] == "<p>cached 101</p>"
@@ -719,35 +716,39 @@ DIRTY_HTML = (
 
 
 @pytest.mark.parametrize("update_mode", [False, True])
-def test_load_or_fetch_sanitizes_fetched_html_once(tmp_path, episodes, update_mode):
-    cache_dir = tmp_path / ".raw_cache"
-    cache_dir.mkdir()
+def test_build_epub_sanitizes_fetched_html(monkeypatch, tmp_path, novel_data, episodes, update_mode):
+    monkeypatch.setattr(builder, "fetch_novel_and_episodes",
+                        lambda *a, **k: (novel_data, episodes[:1], _metadata(novel_data)))
+    cache_dir = tmp_path / "a-test-novel" / ".raw_cache"
     client = DummyFetchClient([{
         "html": DIRTY_HTML,
         "epi_no": 101,
         "epi_title": "First / Chapter",
     }])
 
-    results = builder._load_or_fetch_episodes(
-        client, episodes[:1], str(cache_dir), update_mode=update_mode
-    )
+    output, _, _ = builder.build_epub(client, 42, str(tmp_path), update_mode=update_mode)
 
+    with zipfile.ZipFile(output) as archive:
+        chapter = archive.read("EPUB/chap_0001.xhtml").decode("utf-8")
     expected = html_from_episode_text(DIRTY_HTML)
-    assert results[0]["html"] == expected
-    assert "<script>" not in results[0]["html"]
-    assert "onclick" not in results[0]["html"]
-    assert 'src="https://image.novelpia.com/x.png"' in results[0]["html"]
+    assert "fresh" in chapter
+    assert "<script>" not in chapter
+    assert "onclick" not in chapter
     if update_mode:
         cached = json.loads((cache_dir / "101.json").read_text(encoding="utf-8"))
         assert cached["html"] == expected
+        assert 'src="https://image.novelpia.com/x.png"' in cached["html"]
     else:
         assert not (cache_dir / "101.json").exists()
 
 
-def test_load_or_fetch_uses_cached_html_without_resanitizing(tmp_path, episodes):
-    cache_dir = tmp_path / ".raw_cache"
-    cache_dir.mkdir()
-    # Comment would be stripped if html_from_episode_text ran again.
+def test_build_epub_uses_cached_html_without_resanitizing(monkeypatch, tmp_path, novel_data, episodes):
+    monkeypatch.setattr(builder, "fetch_novel_and_episodes",
+                        lambda *a, **k: (novel_data, episodes[:1], _metadata(novel_data)))
+    book_dir = tmp_path / "a-test-novel"
+    cache_dir = book_dir / ".raw_cache"
+    cache_dir.mkdir(parents=True)
+    (book_dir / ".novel_id").write_text("42", encoding="ascii")
     cached_html = "<p>cached-as-is</p><!-- keep me -->"
     (cache_dir / "101.json").write_text(
         json.dumps({
@@ -763,12 +764,11 @@ def test_load_or_fetch_uses_cached_html_without_resanitizing(tmp_path, episodes)
         AssertionError("matching cache should skip the network")
     )
 
-    results = builder._load_or_fetch_episodes(
-        client, episodes[:1], str(cache_dir), update_mode=True
-    )
+    output, _, _ = builder.build_epub(client, 42, str(tmp_path), update_mode=True)
 
-    assert results[0]["html"] == cached_html
-    assert "<!-- keep me -->" in results[0]["html"]
+    with zipfile.ZipFile(output) as archive:
+        chapter = archive.read("EPUB/chap_0001.xhtml").decode("utf-8")
+    assert "<!-- keep me -->" in chapter
     assert "<!-- keep me -->" not in html_from_episode_text(cached_html)
 
 

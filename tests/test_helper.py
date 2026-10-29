@@ -1,10 +1,14 @@
 import json
+import threading
 from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
 
 import pytest
+from curl_cffi import requests
 
 from src import helper
+from src.api import NovelpiaClient, request_with_retries
 
 
 @pytest.mark.parametrize(
@@ -65,24 +69,20 @@ def test_normalize_url_rewrites_dead_image_hosts(source, expected):
     assert helper.normalize_url(source) == expected
 
 
-def test_image_url_allowlist_is_exact_and_https_only():
-    assert helper.is_approved_image_url("https://image.novelpia.com/a.jpg")
-    assert helper.is_approved_image_url("https://global.novelpia.com/a.jpg")
-    assert helper.is_approved_image_url(
-        helper.normalize_url(
-            "https://d.novelpia.com/imagebox/80/804a58cc60faed71c0e370df07d17073_499547.png"
-        )
+@pytest.mark.parametrize("url", [
+    "http://image.novelpia.com/a.jpg",
+    "https://image.novelpia.com.evil.test/a.jpg",
+])
+def test_image_fetch_blocks_http_and_lookalike_hosts(url):
+    client = object.__new__(NovelpiaClient)
+    client.cancel_event = None
+    client.timeout = 1
+    client.s = SimpleNamespace(cookies={})
+    client._image_s = SimpleNamespace(
+        cookies={}, get=lambda *args, **kwargs: pytest.fail("unapproved URL was fetched")
     )
-    assert helper.is_approved_image_url(
-        "https://images.novelpia.com/imagebox/cover/11576a6b7d10e5a37598da89dfa7b3b6_369320_ori.wimg"
-    )
-    assert helper.is_approved_image_url("https://gn.novelpia.com/a.jpg")
-    assert helper.is_approved_image_url(
-        helper.normalize_url("https://img.novelpia.com/a.jpg")
-    )
-    assert not helper.is_approved_image_url("http://image.novelpia.com/a.jpg")
-    assert not helper.is_approved_image_url("https://image.novelpia.com.evil.test/a.jpg")
-    assert not helper.is_approved_image_url("https://evil.test/a.jpg")
+
+    assert client.fetch_image(url, "https://global.novelpia.com/") is None
 
 
 @pytest.mark.parametrize(
@@ -134,13 +134,37 @@ def test_extract_t_token_reads_nested_and_official_content_urls(payload, expecte
     assert helper.extract_t_token(payload) == expected
 
 
-def test_attach_auth_cookies_does_not_replace_explicit_cookie():
-    cookies = {"USERKEY": "user", "TKEY": "token"}
-    session = SimpleNamespace(cookies=cookies)
-    assert helper.attach_auth_cookies(session) == {
-        "Cookie": "USERKEY=user; TKEY=token; last_login=basic"
-    }
-    assert helper.attach_auth_cookies(session, {"Cookie": "custom=1"})["Cookie"] == "custom=1"
+def test_request_sends_session_and_explicit_cookies_to_server():
+    class CookieEcho(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write("; ".join(self.headers.get_all("Cookie", [])).encode("utf-8"))
+
+        def log_message(self, format, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), CookieEcho)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with requests.Session() as session:
+            session.cookies.set("USERKEY", "example-userkey")
+            session.cookies.set("TKEY", "fixture-token")
+            url = f"http://127.0.0.1:{server.server_port}/data"
+            default = request_with_retries(session, "GET", url).text
+            explicit = request_with_retries(
+                session, "GET", url, headers={"Cookie": "custom=1"}
+            ).text
+        assert "USERKEY=example-userkey" in default
+        assert "TKEY=fixture-token" in default
+        assert "last_login=basic" in default
+        assert "custom=1" in explicit
+        assert "last_login=basic" not in explicit
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
 
 
 def test_atomic_writes_create_parent_and_valid_json(tmp_path):

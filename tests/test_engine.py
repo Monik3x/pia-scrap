@@ -377,14 +377,18 @@ def test_download_queue_keeps_summary_when_cancelled_during_failure_backoff(
     assert any("Finished queue" in status for status in statuses)
 
 
-def test_status_and_progress_callbacks_are_isolated_from_callback_errors(caplog):
+def test_status_and_progress_callbacks_are_isolated_from_callback_errors(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(engine, "build_epub", lambda *args, **kwargs: ("book.epub", "Book", 1))
     scraper = engine.ScraperEngine(
+        out_dir=str(tmp_path),
         status_callback=lambda message: (_ for _ in ()).throw(RuntimeError("boom")),
         progress_callback=lambda *args: (_ for _ in ()).throw(RuntimeError("boom")),
     )
+    scraper.client = SimpleNamespace(sleep_cooperative=lambda seconds: None)
     with caplog.at_level("ERROR", logger="pia_scrap"):
-        scraper.update_status("still safe")
-        scraper.update_progress(1, 2, "safe")
+        result = scraper.run_download_queue([1])
+    assert result["success"] == 1
+    assert result["results"][0]["title"] == "Book"
     assert "Error in status callback" in caplog.text
     assert "Error in progress callback" in caplog.text
 
@@ -622,31 +626,11 @@ def test_download_queue_404_keeps_the_local_id_claim(monkeypatch, tmp_path):
     result = scraper.run_download_queue([9])
 
     assert result["results"][0]["status"] == "404"
+    assert result["results"][0]["error"] == "Novel 9 returned 404. Skipping."
+    assert result["failed"] == 1
+    assert "Novel 9 returned 404. Skipping." in engine.format_run_recap(result)
     assert (book / ".novel_id").read_text(encoding="ascii") == "9"
     assert not (book / ".retired").exists()
-
-
-def test_download_queue_404_error_text_appears_in_recap(monkeypatch, tmp_path):
-    class HttpError(Exception):
-        def __init__(self):
-            super().__init__("not found")
-            self.response = SimpleNamespace(status_code=404)
-
-    monkeypatch.setattr(
-        engine,
-        "build_epub",
-        lambda *args, **kwargs: (_ for _ in ()).throw(HttpError()),
-    )
-    scraper = engine.ScraperEngine(out_dir=str(tmp_path))
-    scraper.client = SimpleNamespace(sleep_cooperative=lambda seconds: None)
-
-    result = scraper.run_download_queue([9])
-    entry = result["results"][0]
-    assert entry["status"] == "404"
-    assert entry["error"] == "Novel 9 returned 404. Skipping."
-    assert result["failed"] == 1
-    recap = engine.format_run_recap(result)
-    assert "Novel 9 returned 404. Skipping." in recap
 
 
 def test_download_queue_mid_novel_cancel_records_interrupted_and_keeps_warnings(

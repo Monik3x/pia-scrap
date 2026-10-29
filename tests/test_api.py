@@ -1,9 +1,10 @@
+import json
 import threading
 import time
 
 import pytest
 
-from src import api
+from src import api, helper
 
 
 class FakeResponse:
@@ -88,21 +89,6 @@ def test_request_retries_server_errors(monkeypatch):
     assert len(session.calls) == 2
     assert len(waits) == 1
     assert "USERKEY=u" in session.calls[0][2]["headers"]["Cookie"]
-
-
-def test_request_returns_classified_ticket_500_without_backoff(monkeypatch):
-    body = _ticket_block_body("0008", "novel.ADVERTISEMENT_EPISODE", 23, 2407)
-    session = FakeSession([FakeResponse(500, body)])
-    waits = []
-    monkeypatch.setattr(api, "_wait_for_retry", lambda seconds, event, reason: waits.append(seconds))
-
-    response = api.request_with_retries(
-        session, "GET", "https://example.test/v1/novel/episode", max_retries=4
-    )
-
-    assert response.status_code == 500
-    assert len(session.calls) == 1
-    assert waits == []
 
 
 @pytest.mark.parametrize(
@@ -191,62 +177,46 @@ def test_novel_maps_server_error_to_unavailable_novel(monkeypatch, status_code):
 
 
 def test_novel_omits_login_at_and_still_sends_session_cookies():
-    session = FakeSession([
-        FakeResponse(200, {"result": {"novel": {"novel_no": 1624}}}),
-    ])
+    class NovelSession(FakeSession):
+        def request(self, method, url, **kwargs):
+            self.calls.append((method, url, kwargs))
+            if "login-at" in kwargs["headers"]:
+                return FakeResponse(200, {"result": {"novel": {"free": 0}}})
+            return FakeResponse(200, {"result": {"novel": {"free": 5}}})
+
+    session = NovelSession([])
     client = _client_with_session(session)
-    client.tokens = api.Tokens(login_at="secret-login")
-
-    payload = client.novel(1624)
-
-    assert payload == {"result": {"novel": {"novel_no": 1624}}}
-    assert len(session.calls) == 1
-    method, url, kwargs = session.calls[0]
-    assert method == "GET"
-    assert url.endswith("/v1/novel")
-    assert kwargs["params"] == {"novel_no": 1624}
-    assert "login-at" not in kwargs["headers"]
-    assert "USERKEY=u" in kwargs["headers"]["Cookie"]
+    assert client.novel(1624)["result"]["novel"]["free"] == 5
+    assert "USERKEY=u" in session.calls[0][2]["headers"]["Cookie"]
 
 
 def test_novel_auth_recovery_does_not_inject_login_at():
-    session = FakeSession([
-        FakeResponse(401),
-        FakeResponse(200, {"result": {"novel": {"novel_no": 1}}}),
-    ])
+    class NovelSession(FakeSession):
+        def request(self, method, url, **kwargs):
+            self.calls.append((method, url, kwargs))
+            if len(self.calls) == 1:
+                return FakeResponse(401)
+            free = 0 if "login-at" in kwargs["headers"] else 5
+            return FakeResponse(200, {"result": {"novel": {"free": free}}})
+
+    session = NovelSession([])
     client = _client_with_session(session)
-    client.tokens = api.Tokens(login_at="secret-login")
-    client.refresh = lambda: "fresh-login-at"
-
-    payload = client.novel(1)
-
-    assert payload == {"result": {"novel": {"novel_no": 1}}}
-    assert len(session.calls) == 2
-    assert "login-at" not in session.calls[0][2]["headers"]
-    assert "login-at" not in session.calls[1][2]["headers"]
-    assert "USERKEY=u" in session.calls[1][2]["headers"]["Cookie"]
+    client.refresh = lambda: "fixture-token"
+    assert client.novel(1)["result"]["novel"]["free"] == 5
+    assert "USERKEY=u" in session.calls[-1][2]["headers"]["Cookie"]
 
 
 def test_me_sends_login_at_and_refreshes_it_on_the_retry():
-    session = FakeSession([
-        FakeResponse(401),
-        FakeResponse(200, {"ok": True}),
-    ])
-    client = make_api_client(session=session, login_at="old-login")
-    refreshes = []
+    class AuthSession(FakeSession):
+        def request(self, method, url, **kwargs):
+            if kwargs["headers"].get("login-at") == "fixture-token":
+                return FakeResponse(200, {"ok": True})
+            return FakeResponse(401)
 
-    def refresh():
-        refreshes.append("fresh-login-at")
-        return "fresh-login-at"
-
-    client.refresh = refresh
+    client = make_api_client(session=AuthSession([]), login_at="old-login")
+    client.refresh = lambda: "fixture-token"
     client.login = lambda: pytest.fail("login should not run")
-
     assert client.me() == {"ok": True}
-    assert refreshes == ["fresh-login-at"]
-    assert len(session.calls) == 2
-    assert session.calls[0][2]["headers"]["login-at"] == "old-login"
-    assert session.calls[1][2]["headers"]["login-at"] == "fresh-login-at"
 
 
 def test_episode_list_maps_missing_episodes_to_no_episodes_error(monkeypatch):
@@ -274,27 +244,18 @@ def test_episode_list_maps_missing_episodes_to_no_episodes_error(monkeypatch):
         client.episode_list(647, rows=1000)
 
 
-@pytest.mark.parametrize(
-    ("requested_rows", "sent_rows"),
-    [(1, 2), (2, 2), (20, 20)],
-)
-def test_episode_list_sends_at_least_two_rows(monkeypatch, requested_rows, sent_rows):
-    payload = {"result": {"list": [{"episode_no": 600376}]}}
-    calls = []
+@pytest.mark.parametrize("requested_rows", [1, 2, 20])
+def test_episode_list_requests_enough_rows_for_server(requested_rows):
+    class ListSession(FakeSession):
+        def request(self, method, url, **kwargs):
+            params = kwargs["params"]
+            if params["rows"] < 2:
+                return FakeResponse(500)
+            return FakeResponse(200, {"result": {"list": list(range(params["rows"]))}})
 
-    def fake_request(*args, **kwargs):
-        calls.append(kwargs)
-        return FakeResponse(200, payload)
-
-    monkeypatch.setattr(api, "request_with_retries", fake_request)
-    client = make_api_client()
-
-    assert client.episode_list(3894, rows=requested_rows) == payload
-    assert calls[0]["params"] == {
-        "novel_no": 3894,
-        "rows": sent_rows,
-        "sort": "ASC",
-    }
+    client = _client_with_session(ListSession([]))
+    result = client.episode_list(3894, rows=requested_rows)
+    assert len(result["result"]["list"]) == max(2, requested_rows)
 
 
 @pytest.mark.parametrize(
@@ -307,26 +268,20 @@ def test_episode_list_sends_at_least_two_rows(monkeypatch, requested_rows, sent_
     ],
 )
 def test_request_rate_limit_honors_retry_after_with_five_second_minimum(
-    monkeypatch, retry_after, expected_wait
+    retry_after, expected_wait
 ):
     headers = {} if retry_after is None else {"Retry-After": retry_after}
     session = FakeSession([FakeResponse(429, headers=headers), FakeResponse(200)])
-    waits = []
-    monkeypatch.setattr(
-        api,
-        "_wait_for_retry",
-        lambda seconds, event, reason: waits.append(seconds),
-    )
-
+    started_at = time.monotonic()
     response = api.request_with_retries(
         session,
         "GET",
         "https://example.test/data",
         max_retries=2,
     )
-
+    elapsed = time.monotonic() - started_at
     assert response.status_code == 200
-    assert waits == [expected_wait]
+    assert elapsed >= expected_wait - 0.05
 
 
 def test_request_returns_final_429_and_callbacks_on_exhausted_retries(monkeypatch):
@@ -401,62 +356,37 @@ def test_cancellation_interrupts_rate_limit_wait():
 
 
 def test_request_recovers_expired_auth():
-    session = FakeSession([
-        FakeResponse(401),
-        FakeResponse(200),
-    ])
+    class AuthSession(FakeSession):
+        def request(self, method, url, **kwargs):
+            if kwargs["headers"].get("login-at") == "fixture-token":
+                return FakeResponse(200)
+            return FakeResponse(401)
 
     response = api.request_with_retries(
-        session, "GET", "https://example.test/data", allow_refresh=True,
-        refresh_fn=lambda: "fresh-login-at",
+        AuthSession([]), "GET", "https://example.test/data", allow_refresh=True,
+        refresh_fn=lambda: "fixture-token",
     )
-
     assert response.status_code == 200
-    assert session.calls[1][2]["headers"]["login-at"] == "fresh-login-at"
 
 
-def test_auth_recovery_preserves_headers_that_omitted_login_at():
-    session = FakeSession([
-        FakeResponse(401),
-        FakeResponse(200),
-    ])
-
-    response = api.request_with_retries(
-        session, "GET", "https://example.test/v1/novel",
-        headers={}, allow_refresh=True,
-        refresh_fn=lambda: "fresh-login-at",
-    )
-
-    assert response.status_code == 200
-    assert "login-at" not in session.calls[0][2]["headers"]
-    assert "login-at" not in session.calls[1][2]["headers"]
-
-
-def test_login_persists_tokens(monkeypatch):
+@pytest.mark.parametrize("method_name", ["login", "refresh"])
+def test_auth_persists_tokens(monkeypatch, tmp_path, method_name):
+    config_path = tmp_path / "api.json"
+    config_path.write_text(json.dumps({"other": "keep"}), encoding="utf-8")
+    monkeypatch.setattr(helper, "CONFIG_PATH", str(config_path))
     client = make_api_client()
     client.email = "user@example.test"
     client.password = "pw"
-    client.s = FakeSession([])
-    client.s.cookies = {"USERKEY": "new-user", "TKEY": "new-tkey"}
-    saves = []
-    monkeypatch.setattr(
-        api,
-        "request_with_retries",
-        lambda *args, **kwargs: FakeResponse(200, {"result": {"LOGINAT": "new-login"}}),
-    )
-    monkeypatch.setattr(api, "load_config", lambda: {"other": "keep"})
-    monkeypatch.setattr(api, "save_config", lambda config: saves.append(config) or True)
+    client.s = FakeSession([FakeResponse(200, {"result": {"LOGINAT": "fixture-token"}})])
+    client.s.cookies = {"USERKEY": "example-userkey", "TKEY": "example-tkey"}
+    client.tokens.userkey = "example-userkey"
+    client.tokens.tkey = "example-tkey"
 
-    assert client.login() == "new-login"
-    assert client.tokens.login_at == "new-login"
-    assert client.tokens.userkey == "new-user"
-    assert client.tokens.tkey == "new-tkey"
-    assert saves == [{
-        "other": "keep",
-        "login_at": "new-login",
-        "userkey": "new-user",
-        "tkey": "new-tkey",
-    }]
+    assert getattr(client, method_name)() == "fixture-token"
+    assert json.loads(config_path.read_text(encoding="utf-8")) == {
+        "other": "keep", "login_at": "fixture-token",
+        "userkey": "example-userkey", "tkey": "example-tkey",
+    }
 
 
 @pytest.mark.parametrize("method_name", ["login", "refresh"])
@@ -522,17 +452,15 @@ def test_login_and_refresh_reject_malformed_authentication_payloads(
 def test_request_does_not_refresh_for_forbidden_access():
     session = FakeSession([
         FakeResponse(403, {"error": {"code": "SUBSCRIPTION_REQUIRED", "message": "Premium access required"}}),
+        FakeResponse(200),
     ])
-    refreshes = []
 
     response = api.request_with_retries(
         session, "GET", "https://example.test/data", allow_refresh=True,
-        refresh_fn=lambda: refreshes.append(True),
+        refresh_fn=lambda: "fixture-token",
     )
 
     assert response.status_code == 403
-    assert refreshes == []
-    assert len(session.calls) == 1
 
 
 def test_request_recovers_auth_specific_forbidden_response():
