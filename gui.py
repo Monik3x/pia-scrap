@@ -650,25 +650,31 @@ class PiaScrapGUI(ctk.CTk):
                 return (0, 0)
             return (stat.st_mtime_ns, stat.st_size)
 
-        epub_stamp = (0, 0)
-        try:
-            names = os.listdir(book_dir)
-        except OSError:
-            names = []
-        epubs = [
-            name for name in names
-            if name.lower().endswith(".epub") and not name.lower().endswith(".tmp")
-        ]
-        base = os.path.basename(os.path.normpath(book_dir)) + ".epub"
-        chosen = None
-        for name in epubs:
-            if name.casefold() == base.casefold():
-                chosen = name
-                break
-        if chosen is None and len(epubs) == 1:
-            chosen = epubs[0]
-        if chosen:
-            epub_stamp = stamp(os.path.join(book_dir, chosen))
+        # The usual EPUB is named after the folder. List the directory only to
+        # find one EPUB that is not.
+        base_name = os.path.basename(os.path.normpath(book_dir)) + ".epub"
+        direct = os.path.join(book_dir, base_name)
+        if os.path.isfile(direct):
+            epub_stamp = stamp(direct)
+        else:
+            epub_stamp = (0, 0)
+            try:
+                names = os.listdir(book_dir)
+            except OSError:
+                names = []
+            epubs = [
+                name for name in names
+                if name.lower().endswith(".epub") and not name.lower().endswith(".tmp")
+            ]
+            chosen = None
+            for name in epubs:
+                if name.casefold() == base_name.casefold():
+                    chosen = name
+                    break
+            if chosen is None and len(epubs) == 1:
+                chosen = epubs[0]
+            if chosen:
+                epub_stamp = stamp(os.path.join(book_dir, chosen))
         return (
             stamp(os.path.join(book_dir, ".novel_id")),
             stamp(os.path.join(book_dir, ".retired")),
