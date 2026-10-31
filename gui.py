@@ -9,7 +9,7 @@ from typing import Dict, Any
 
 from dotenv import load_dotenv
 import customtkinter as ctk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from src.api import DownloadCancelled
 from src.engine import ScraperEngine, format_run_recap
@@ -103,7 +103,10 @@ class PiaScrapGUI(ctk.CTk):
         self.filtered_dirs = []
         self.label_filter = "All"
         self._label_map = {}
+        self._custom_labels = list(reading_list.BUILTIN_LABELS)
         self._label_root = None
+        self._label_manager = None
+        self._label_manager_list = None
         self._labels_unreadable = False
         self._page_rows = {}
         self._library_generation = 0
@@ -270,6 +273,8 @@ class PiaScrapGUI(ctk.CTk):
             text_color="#FFFFFF",
             text_color_disabled=("#A2AFBE", "#9AA9BA"),
         )
+        self._library_secondary = secondary
+        self._library_blue = blue
         menu_colors = dict(
             fg_color=secondary["fg_color"],
             button_color=("#D1D6DC", "#454B53"),
@@ -291,7 +296,8 @@ class PiaScrapGUI(ctk.CTk):
 
         self.label_filter_var = ctk.StringVar(value="All")
         self.label_filter_menu = ctk.CTkOptionMenu(
-            top_bar, values=["All", "Unlabeled", *reading_list.BUILTIN_LABELS],
+            top_bar,
+            values=["All", "Unlabeled", *reading_list.BUILTIN_LABELS, reading_list.MANAGE_LABELS_COMMAND],
             variable=self.label_filter_var, command=self.on_label_filter_changed,
             width=140, **menu_colors,
         )
@@ -434,8 +440,10 @@ class PiaScrapGUI(ctk.CTk):
         label_root = os.path.abspath(out_dir)
         if label_root != self._label_root:
             self._label_map = {}
+            self._custom_labels = list(reading_list.BUILTIN_LABELS)
             self._label_root = label_root
         self._library_jobs.put(("load_labels", out_dir, [], None))
+        self._fill_label_manager()
         if self._search_after is not None:
             self.after_cancel(self._search_after)
             self._search_after = None
@@ -451,6 +459,10 @@ class PiaScrapGUI(ctk.CTk):
         self._apply_library_query(reset_page=True)
 
     def on_label_filter_changed(self, value):
+        if value == reading_list.MANAGE_LABELS_COMMAND:
+            self.label_filter_var.set(self.label_filter)
+            self._open_label_manager()
+            return
         if value == self.label_filter:
             return
         self.label_filter = value
@@ -459,24 +471,28 @@ class PiaScrapGUI(ctk.CTk):
     def _labels_for_view(self, out_dir):
         return self._label_map
 
+    def _custom_label_names(self, labels):
+        blocked = {item.casefold() for item in reading_list.RESERVED_LABELS}
+        names = []
+        seen = set()
+        for value in [*self._custom_labels, *labels.values()]:
+            if not isinstance(value, str):
+                continue
+            folded = value.casefold()
+            if folded in seen or folded in blocked:
+                continue
+            seen.add(folded)
+            names.append(value)
+        return names
+
     def _filter_values(self, labels):
-        custom = []
-        for value in labels.values():
-            if value in reading_list.BUILTIN_LABELS or value in custom:
-                continue
-            if value in ("All", "Unlabeled"):
-                continue
-            custom.append(value)
-        custom.sort(key=str.casefold)
-        return ["All", "Unlabeled", *reading_list.BUILTIN_LABELS, *custom]
+        return ["All", "Unlabeled", *self._custom_label_names(labels)]
 
     def _sync_label_filter(self, labels):
         values = self._filter_values(labels)
-        self.label_filter_menu.configure(values=values)
-        move_values = ["Move to", "Clear label", *reading_list.BUILTIN_LABELS]
-        for extra in labels.values():
-            if extra not in move_values and extra not in ("All", "Unlabeled"):
-                move_values.append(extra)
+        self.label_filter_menu.configure(values=[*values, reading_list.MANAGE_LABELS_COMMAND])
+        custom = self._custom_label_names(labels)
+        move_values = ["Move to", "Clear label", *custom]
         self.move_menu.configure(values=move_values)
         if self.move_var.get() not in move_values:
             self.move_var.set("Move to")
@@ -545,7 +561,7 @@ class PiaScrapGUI(ctk.CTk):
         if chosen == "Unlabeled":
             names = [name for name in names if name not in labels]
         elif chosen != "All":
-            names = [name for name in names if labels.get(name) == chosen]
+            names = [name for name in names if reading_list.same_label(labels.get(name, ""), chosen)]
         self.filtered_dirs = names
         if reset_page:
             self.current_page = 0
@@ -705,11 +721,25 @@ class PiaScrapGUI(ctk.CTk):
                     self.logger.warning(f"Could not store the library progress cache: {exc}")
 
     def _library_edit(self, kind, out_dir, folders, value):
+        labels = None
+        custom = None
         try:
             if kind == "labels":
                 labels = reading_list.set_labels(out_dir, folders, value)
+                custom = reading_list.custom_labels(out_dir)
             elif kind == "load_labels":
                 labels = reading_list.read_labels(out_dir)
+                custom = reading_list.custom_labels(out_dir)
+            elif kind == "add_label":
+                custom = reading_list.add_custom_label(out_dir, value)
+                labels = reading_list.read_labels(out_dir)
+            elif kind == "rename_label":
+                old, new = value
+                labels = reading_list.rename_custom_label(out_dir, old, new)
+                custom = reading_list.custom_labels(out_dir)
+            elif kind == "delete_label":
+                labels = reading_list.delete_custom_label(out_dir, value)
+                custom = reading_list.custom_labels(out_dir)
             elif kind == "chapter":
                 book_dir = os.path.join(out_dir, folders[0])
                 line = reading_list.read_chapter_line(book_dir, value)
@@ -724,9 +754,13 @@ class PiaScrapGUI(ctk.CTk):
             if kind == "load_labels":
                 self.gui_queue.put(("library_labels_unreadable", out_dir))
                 return
-            self.gui_queue.put(("library_edit_error", ("Label" if kind == "labels" else "Chapter", str(exc))))
+            title = "Chapter" if kind == "chapter" else "Label"
+            self.gui_queue.put(("library_edit_error", (title, str(exc))))
             return
-        self.gui_queue.put(("library_edit_done", (kind, out_dir, labels if kind in ("labels", "load_labels") else None)))
+        if kind == "chapter":
+            self.gui_queue.put(("library_edit_done", (kind, out_dir, None)))
+        else:
+            self.gui_queue.put(("library_edit_done", (kind, out_dir, labels, custom)))
 
     def _load_library_row(self, out_dir, folder):
         book_dir = os.path.join(out_dir, folder)
@@ -939,6 +973,9 @@ class PiaScrapGUI(ctk.CTk):
                 ids.append(str(novel_id))
         return ids
 
+    def _library_output_dir(self):
+        return self.output_entry.get().strip() or "output"
+
     def _move_selected(self, value):
         self.move_var.set("Move to")
         if value in ("Move to", ""):
@@ -954,6 +991,120 @@ class PiaScrapGUI(ctk.CTk):
         out_dir = self.output_entry.get().strip() or "output"
         folders = [self._page_rows[name]["folder"] for name in selected if name in self._page_rows]
         self._library_jobs.put(("labels", out_dir, folders, label))
+
+    def _open_label_manager(self):
+        window = self._label_manager
+        if window is not None and window.winfo_exists():
+            window.lift()
+            window.focus()
+            return
+        window = ctk.CTkToplevel(self)
+        window.title("Custom labels")
+        window.geometry("420x360")
+        window.minsize(360, 240)
+        window.transient(self)
+        self._label_manager = window
+        window.protocol("WM_DELETE_WINDOW", self._close_label_manager)
+        add_row = ctk.CTkFrame(window, fg_color="transparent")
+        add_row.pack(fill="x", padx=16, pady=(16, 8))
+        entry = ctk.CTkEntry(add_row, placeholder_text="New label")
+        entry.pack(side="left", fill="x", expand=True)
+        entry.bind("<Return>", lambda _event: self._add_custom_from_manager(entry) or "break")
+        ctk.CTkButton(
+            add_row, text="Add", width=64, command=lambda: self._add_custom_from_manager(entry),
+            **self._library_blue,
+        ).pack(side="left", padx=(8, 0))
+        listing = ctk.CTkFrame(window, fg_color="transparent")
+        listing.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        self._label_manager_list = listing
+        self._fill_label_manager()
+        window.after(50, window.lift)
+        window.after(50, entry.focus)
+
+    def _close_label_manager(self):
+        window = self._label_manager
+        self._label_manager = None
+        self._label_manager_list = None
+        if window is not None:
+            window.destroy()
+
+    def _fill_label_manager(self):
+        window = self._label_manager
+        frame = self._label_manager_list
+        if window is None or frame is None or not window.winfo_exists():
+            return
+        for child in frame.winfo_children():
+            child.destroy()
+        names = self._custom_label_names(self._label_map)
+        if not names:
+            ctk.CTkLabel(
+                frame, text="No labels yet.", font=ctk.CTkFont(slant="italic"),
+            ).pack(anchor="w", pady=8)
+            return
+        for name in names:
+            row = ctk.CTkFrame(frame, fg_color="transparent")
+            row.pack(fill="x", pady=4)
+            ctk.CTkLabel(row, text=name, anchor="w").pack(side="left", fill="x", expand=True)
+            ctk.CTkButton(
+                row, text="Rename", width=72, command=lambda current=name: self._rename_custom_label(current),
+                **self._library_secondary,
+            ).pack(side="left", padx=(8, 4))
+            ctk.CTkButton(
+                row, text="Delete", width=72, command=lambda current=name: self._delete_custom_label(current),
+                **self._library_secondary,
+            ).pack(side="left")
+        window.update_idletasks()
+        needed = window.winfo_reqheight()
+        if needed > 360:
+            window.geometry(f"420x{min(needed, 640)}")
+
+    def _manager_parent(self):
+        window = self._label_manager
+        if window is not None and window.winfo_exists():
+            return window
+        return self
+
+    def _add_custom_from_manager(self, entry):
+        try:
+            text = reading_list.normalize_label_name(entry.get())
+        except reading_list.LabelNameError as exc:
+            messagebox.showerror("Label", str(exc), parent=self._manager_parent())
+            return
+        known = self._custom_label_names(self._label_map)
+        if reading_list.matching_label(text, known):
+            messagebox.showerror("Label", "That label already exists.", parent=self._manager_parent())
+            return
+        entry.delete(0, "end")
+        self._library_jobs.put(("add_label", self._library_output_dir(), [], text))
+
+    def _rename_custom_label(self, old):
+        parent = self._manager_parent()
+        raw = simpledialog.askstring("Rename label", "New name:", initialvalue=old, parent=parent)
+        if raw is None:
+            return
+        try:
+            text = reading_list.normalize_label_name(raw)
+        except reading_list.LabelNameError as exc:
+            messagebox.showerror("Label", str(exc), parent=parent)
+            return
+        if text == old:
+            return
+        match = reading_list.matching_label(text, self._custom_label_names(self._label_map))
+        if match is not None and match != old:
+            messagebox.showerror("Label", "That label already exists.", parent=parent)
+            return
+        self._library_jobs.put(("rename_label", self._library_output_dir(), [], (old, text)))
+
+    def _delete_custom_label(self, name):
+        parent = self._manager_parent()
+        agreed = messagebox.askyesno(
+            "Delete label",
+            f'Delete "{name}"? Novels with that label become unlabeled.',
+            parent=parent,
+        )
+        if not agreed:
+            return
+        self._library_jobs.put(("delete_label", self._library_output_dir(), [], name))
 
     def _set_selected_chapter_event(self, _event):
         self.set_selected_chapter()
@@ -1213,14 +1364,26 @@ class PiaScrapGUI(ctk.CTk):
                     title, error = data
                     messagebox.showerror(title, error)
                 elif task == "library_edit_done":
-                    kind, out_dir, labels = data
-                    if os.path.abspath(self.output_entry.get().strip() or "output") == os.path.abspath(out_dir):
-                        if kind in ("labels", "load_labels"):
-                            self._labels_unreadable = False
-                            self._label_map = labels
-                            self._apply_library_query(reset_page=False)
-                        else:
-                            self.display_current_page()
+                    kind, out_dir, labels, *extra = data
+                    same_library = os.path.abspath(self.output_entry.get().strip() or "output") == os.path.abspath(out_dir)
+                    label_kinds = ("labels", "load_labels", "add_label", "rename_label", "delete_label")
+                    if same_library and kind in label_kinds:
+                        previous = set(self._custom_label_names(self._label_map))
+                        self._labels_unreadable = False
+                        self._label_map = {} if labels is None else labels
+                        if extra:
+                            self._custom_labels = extra[0]
+                        if kind == "rename_label":
+                            appeared = [
+                                name for name in self._custom_label_names(self._label_map)
+                                if name not in previous
+                            ]
+                            if self.label_filter not in self._filter_values(self._label_map) and len(appeared) == 1:
+                                self.label_filter = appeared[0]
+                        self._apply_library_query(reset_page=False)
+                        self._fill_label_manager()
+                    elif same_library:
+                        self.display_current_page()
                 elif task == "library_labels_unreadable":
                     if os.path.abspath(self.output_entry.get().strip() or "output") == os.path.abspath(data):
                         if not self._labels_unreadable:

@@ -446,6 +446,79 @@ def test_batch_labels_updates_every_folder(tmp_path):
     assert reading_list.read_labels(str(tmp_path)) == expected
 
 
+def test_custom_label_name_rules(tmp_path):
+    reading_list.add_custom_label(str(tmp_path), "  Reread  ")
+    assert reading_list.custom_labels(str(tmp_path)) == [*reading_list.BUILTIN_LABELS, "Reread"]
+    assert reading_list.read_labels(str(tmp_path)) == {}
+    before = (tmp_path / "reading_labels.json").read_bytes()
+    for name in ("", "Reading", "reread", "All", "Manage labels...", "x" * 41):
+        with pytest.raises(reading_list.LabelNameError):
+            reading_list.add_custom_label(str(tmp_path), name)
+    assert (tmp_path / "reading_labels.json").read_bytes() == before
+
+
+def test_legacy_custom_value_is_listed_without_rewriting_the_file(tmp_path):
+    path = tmp_path / "reading_labels.json"
+    path.write_text(json.dumps({"a": "Reread"}), encoding="utf-8")
+    before = path.read_bytes()
+    assert reading_list.read_labels(str(tmp_path)) == {"a": "Reread"}
+    assert reading_list.custom_labels(str(tmp_path)) == [*reading_list.BUILTIN_LABELS, "Reread"]
+    assert path.read_bytes() == before
+
+
+def test_bad_custom_name_list_is_left_unchanged(tmp_path):
+    path = tmp_path / "reading_labels.json"
+    path.write_text(json.dumps({"a": "Reading", "labels/custom": "Reread"}), encoding="utf-8")
+    original = path.read_bytes()
+    with pytest.raises(reading_list.LabelsUnreadable):
+        reading_list.read_labels(str(tmp_path))
+    with pytest.raises(reading_list.LabelsUnreadable):
+        reading_list.set_label(str(tmp_path), "b", "Dropped")
+    assert path.read_bytes() == original
+
+
+def test_rename_and_delete_custom_labels(tmp_path):
+    reading_list.set_labels(str(tmp_path), ["a", "b"], "Reread")
+    reading_list.set_labels(str(tmp_path), ["c"], "Reading")
+    reading_list.add_custom_label(str(tmp_path), "Later")
+    with pytest.raises(reading_list.LabelNameError):
+        reading_list.rename_custom_label(str(tmp_path), "Reread", "Later")
+    assert reading_list.read_labels(str(tmp_path))["a"] == "Reread"
+    reading_list.rename_custom_label(str(tmp_path), "Reread", "Soon")
+    assert reading_list.read_labels(str(tmp_path)) == {"a": "Soon", "b": "Soon", "c": "Reading"}
+    names = reading_list.custom_labels(str(tmp_path))
+    assert names == [*reading_list.BUILTIN_LABELS, "Soon", "Later"]
+    reading_list.delete_custom_label(str(tmp_path), "Soon")
+    assert reading_list.read_labels(str(tmp_path)) == {"c": "Reading"}
+    assert reading_list.custom_labels(str(tmp_path)) == [*reading_list.BUILTIN_LABELS, "Later"]
+
+
+def test_rename_and_delete_match_spacing_and_case(tmp_path):
+    reading_list.write_labels(str(tmp_path), {"a": "Plan  to read", "b": "reading"})
+    reading_list.rename_custom_label(str(tmp_path), "Plan to read", "Paused")
+    assert reading_list.read_labels(str(tmp_path))["a"] == "Paused"
+    reading_list.delete_custom_label(str(tmp_path), "Reading")
+    assert reading_list.read_labels(str(tmp_path)) == {"a": "Paused"}
+    names = reading_list.custom_labels(str(tmp_path))
+    assert "Reading" not in names
+    assert "Plan to read" not in names
+    assert names[0] == "Paused"
+
+
+def test_starting_label_can_be_renamed_and_stays_deleted(tmp_path):
+    reading_list.set_labels(str(tmp_path), ["a", "b"], "Reading")
+    reading_list.rename_custom_label(str(tmp_path), "Reading", "Current")
+    assert reading_list.read_labels(str(tmp_path)) == {"a": "Current", "b": "Current"}
+    names = reading_list.custom_labels(str(tmp_path))
+    assert names[0] == "Current"
+    assert "Reading" not in names
+    reading_list.delete_custom_label(str(tmp_path), "Dropped")
+    assert "Dropped" not in reading_list.custom_labels(str(tmp_path))
+    assert reading_list.read_labels(str(tmp_path)) == {"a": "Current", "b": "Current"}
+    reading_list.add_custom_label(str(tmp_path), "Dropped")
+    assert reading_list.custom_labels(str(tmp_path))[-1] == "Dropped"
+
+
 def test_flush_keeps_a_concurrent_import_dirty(tmp_path, monkeypatch):
     first = tmp_path / "first"
     second = tmp_path / "second"

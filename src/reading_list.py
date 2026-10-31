@@ -17,6 +17,16 @@ from src.helper import write_json_atomic
 BOOKMARK_FILENAME = "calibre_bookmarks.txt"
 LABELS_FILENAME = "reading_labels.json"
 BUILTIN_LABELS = ("Reading", "Plan to read", "On hold", "Dropped", "Completed")
+# A slash cannot be a folder name, so the saved name list can share the folder map.
+# labels/custom is an older extras-only list. labels/names is the full list.
+CUSTOM_LABELS_KEY = "labels/custom"
+LABEL_NAMES_KEY = "labels/names"
+MANAGE_LABELS_COMMAND = "Manage labels..."
+RESERVED_LABELS = frozenset({
+    "All", "Unlabeled", "Move to", "Clear label",
+    MANAGE_LABELS_COMMAND,
+})
+LABEL_NAME_LIMIT = 40
 EMBEDDED_BOOKMARK = "META-INF/calibre_bookmarks.txt"
 EMBEDDED_CHAPTERS = "META-INF/novelpia-chapters.json"
 
@@ -38,6 +48,10 @@ class LabelsUnreadable(ValueError):
     """reading_labels.json exists and is not a map of folder name to label."""
 
 
+class LabelNameError(ValueError):
+    """A custom label name is empty, reserved, built in, or already used."""
+
+
 def _labels_path(root: str) -> str:
     return os.path.join(os.fspath(root), LABELS_FILENAME)
 
@@ -46,44 +60,192 @@ def _bookmark_path(folder: str) -> str:
     return os.path.join(os.fspath(folder), BOOKMARK_FILENAME)
 
 
-def read_labels(root: str) -> Dict[str, str]:
+def _label_file_error() -> LabelsUnreadable:
+    return LabelsUnreadable(f"{LABELS_FILENAME} could not be read.")
+
+
+def normalize_label_name(name: str) -> str:
+    text = " ".join(name.split()) if isinstance(name, str) else ""
+    if not text:
+        raise LabelNameError("Enter a label name.")
+    if len(text) > LABEL_NAME_LIMIT:
+        raise LabelNameError("Use 40 characters or fewer.")
+    if matching_label(text, RESERVED_LABELS):
+        raise LabelNameError("That name is reserved.")
+    return text
+
+
+def same_label(saved, chosen) -> bool:
+    if not isinstance(saved, str) or not isinstance(chosen, str):
+        return False
+    return " ".join(saved.split()).casefold() == " ".join(chosen.split()).casefold()
+
+
+def matching_label(name: str, names) -> Optional[str]:
+    folded = name.casefold() if isinstance(name, str) else ""
+    for item in names:
+        if isinstance(item, str) and item.casefold() == folded:
+            return item
+    return None
+
+
+def _clean_name_list(raw) -> List[str]:
+    if not isinstance(raw, list):
+        raise _label_file_error()
+    names = []
+    seen = set()
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            raise _label_file_error()
+        text = " ".join(item.split())
+        folded = text.casefold()
+        if not text or folded in seen or matching_label(text, RESERVED_LABELS):
+            continue
+        seen.add(folded)
+        names.append(text)
+    return names
+
+
+def _append_missing(names: List[str], values) -> List[str]:
+    saved = list(names)
+    seen = {name.casefold() for name in saved}
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        text = " ".join(value.split())
+        folded = text.casefold()
+        if not text or folded in seen or matching_label(text, RESERVED_LABELS):
+            continue
+        seen.add(folded)
+        saved.append(text)
+    return saved
+
+
+def _implicit_names(folders: Dict[str, str]) -> List[str]:
+    return _append_missing(list(BUILTIN_LABELS), folders.values())
+
+
+def _read_label_file(root: str):
     path = _labels_path(root)
     try:
         with open(path, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
     except FileNotFoundError:
-        return {}
+        return {}, list(BUILTIN_LABELS)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise LabelsUnreadable(f"{LABELS_FILENAME} could not be read.") from exc
+        raise _label_file_error() from exc
     if not isinstance(payload, dict):
-        raise LabelsUnreadable(f"{LABELS_FILENAME} could not be read.")
-    labels: Dict[str, str] = {}
+        raise _label_file_error()
+    folders: Dict[str, str] = {}
     for folder, label in payload.items():
+        if folder in (CUSTOM_LABELS_KEY, LABEL_NAMES_KEY):
+            continue
         if not isinstance(folder, str) or not isinstance(label, str) or not label.strip():
-            raise LabelsUnreadable(f"{LABELS_FILENAME} could not be read.")
-        labels[folder] = label
-    return labels
+            raise _label_file_error()
+        folders[folder] = label
+    if LABEL_NAMES_KEY in payload:
+        names = _clean_name_list(payload[LABEL_NAMES_KEY])
+    elif CUSTOM_LABELS_KEY in payload:
+        names = _append_missing(list(BUILTIN_LABELS), _clean_name_list(payload[CUSTOM_LABELS_KEY]))
+    else:
+        names = list(BUILTIN_LABELS)
+    return folders, _append_missing(names, folders.values())
 
 
-def write_labels(root: str, mapping: Dict[str, str]) -> None:
-    write_json_atomic(_labels_path(root), mapping)
+def _write_saved_labels(root: str, folders: Dict[str, str], names: List[str]) -> None:
+    payload = dict(folders)
+    if list(names) != _implicit_names(folders):
+        payload[LABEL_NAMES_KEY] = list(names)
+    write_json_atomic(_labels_path(root), payload)
+
+
+def read_labels(root: str) -> Dict[str, str]:
+    with _label_lock:
+        folders, _custom = _read_label_file(root)
+        return folders
+
+
+def custom_labels(root: str) -> List[str]:
+    with _label_lock:
+        _folders, custom = _read_label_file(root)
+        return custom
+
+
+def write_labels(root: str, mapping: Dict[str, str], custom: Optional[List[str]] = None) -> None:
+    with _label_lock:
+        folders = {
+            folder: label
+            for folder, label in mapping.items()
+            if folder not in (CUSTOM_LABELS_KEY, LABEL_NAMES_KEY)
+        }
+        if custom is None:
+            _existing, custom = _read_label_file(root)
+        _write_saved_labels(root, folders, custom)
 
 
 def set_labels(root: str, folders, label: str) -> Dict[str, str]:
     with _label_lock:
-        mapping = read_labels(root)
-        text = label.strip() if isinstance(label, str) else ""
+        mapping, custom = _read_label_file(root)
+        text = " ".join(label.split()) if isinstance(label, str) else ""
         for folder in folders:
             if text:
                 mapping[folder] = text
             else:
                 mapping.pop(folder, None)
-        write_labels(root, mapping)
+        if text and matching_label(text, RESERVED_LABELS) is None and matching_label(text, custom) is None:
+            custom = [*custom, text]
+        write_labels(root, mapping, custom)
         return mapping
 
 
 def set_label(root: str, folder: str, label: str) -> Dict[str, str]:
     return set_labels(root, [folder], label)
+
+
+def add_custom_label(root: str, name: str) -> List[str]:
+    with _label_lock:
+        mapping, custom = _read_label_file(root)
+        text = normalize_label_name(name)
+        if matching_label(text, custom):
+            raise LabelNameError("That label already exists.")
+        write_labels(root, mapping, [*custom, text])
+        _folders, saved = _read_label_file(root)
+        return saved
+
+
+def rename_custom_label(root: str, old: str, new: str) -> Dict[str, str]:
+    with _label_lock:
+        mapping, custom = _read_label_file(root)
+        current = matching_label(old, custom)
+        if current is None:
+            raise LabelNameError("That label does not exist.")
+        text = normalize_label_name(new)
+        others = [name for name in custom if name.casefold() != current.casefold()]
+        if matching_label(text, others):
+            raise LabelNameError("That label already exists.")
+        mapping = {
+            folder: text if same_label(value, current) else value
+            for folder, value in mapping.items()
+        }
+        renamed = [text if name.casefold() == current.casefold() else name for name in custom]
+        write_labels(root, mapping, renamed)
+        return mapping
+
+
+def delete_custom_label(root: str, name: str) -> Dict[str, str]:
+    with _label_lock:
+        mapping, custom = _read_label_file(root)
+        current = matching_label(name, custom)
+        if current is None:
+            raise LabelNameError("That label does not exist.")
+        mapping = {
+            folder: value
+            for folder, value in mapping.items()
+            if not same_label(value, current)
+        }
+        remaining = [item for item in custom if item.casefold() != current.casefold()]
+        write_labels(root, mapping, remaining)
+        return mapping
 
 
 def progress_transaction():

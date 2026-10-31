@@ -37,6 +37,20 @@ def test_refresh_reloads_retired_book_identity(tmp_path):
     assert view.library_update_btn.state == "disabled"
 
 
+def test_label_filter_matches_case_and_spacing(tmp_path):
+    view = library_view(tmp_path)
+    view.search_var = Widget("")
+    view.library_dirs = ["the-book", "other"]
+    view.label_filter = "Reading"
+    view._labels_for_view = lambda _: {"the-book": "reading", "other": "Plan  to read"}
+    view._sync_label_filter = lambda _: None
+    PiaScrapGUI._apply_library_query(view, reset_page=True)
+    assert [row[0] for row in view.library_tree.rows.values()] == ["the-book"]
+    view.label_filter = "Plan to read"
+    PiaScrapGUI._apply_library_query(view, reset_page=True)
+    assert [row[0] for row in view.library_tree.rows.values()] == ["other"]
+
+
 @pytest.mark.parametrize(
     ("query", "label", "expected"),
     [
@@ -286,7 +300,10 @@ def test_edit_jobs_survive_page_refreshes(tmp_path):
     view._library_jobs.put(("page", 3, str(tmp_path), ["Book"]))
     threading.Thread(target=PiaScrapGUI._library_loader, args=(view,), daemon=True).start()
     assert view.gui_queue.get(timeout=5) == ("library_edit_done", ("chapter", str(tmp_path), None))
-    assert view.gui_queue.get(timeout=5) == ("library_edit_done", ("labels", str(tmp_path), {"Book": "Reading"}))
+    assert view.gui_queue.get(timeout=5) == (
+        "library_edit_done",
+        ("labels", str(tmp_path), {"Book": "Reading"}, list(reading_list.BUILTIN_LABELS)),
+    )
     assert reading_list.read_bookmark(str(folder)) == {"idx": 1, "episode_no": 101}
     assert reading_list.read_labels(str(tmp_path)) == {"Book": "Reading"}
 
@@ -317,3 +334,98 @@ def test_failed_label_batch_keeps_mapping_and_selection(tmp_path, monkeypatch):
     assert errors == [("Label", "disk full")]
     assert view.library_tree.selection() == selected
     assert reading_list.read_labels(str(tmp_path)) == {"A": "Reading", "B": "Reading"}
+
+
+class Menu:
+    def __init__(self):
+        self.values = []
+
+    def configure(self, **kwargs):
+        if "values" in kwargs:
+            self.values = list(kwargs["values"])
+
+
+def test_filter_menu_ends_with_manage_labels():
+    from src import reading_list
+
+    chosen = []
+    view = SimpleNamespace(
+        _custom_labels=[*reading_list.BUILTIN_LABELS, "Reread"],
+        label_filter="All",
+        label_filter_var=SimpleNamespace(set=lambda value: chosen.append(value)),
+        label_filter_menu=Menu(),
+        move_menu=Menu(),
+        move_var=SimpleNamespace(get=lambda: "Move to", set=lambda _value: None),
+    )
+    view._custom_label_names = PiaScrapGUI._custom_label_names.__get__(view)
+    view._filter_values = PiaScrapGUI._filter_values.__get__(view)
+    PiaScrapGUI._sync_label_filter(view, {"book": "Later"})
+    assert view.label_filter_menu.values == [
+        "All", "Unlabeled", *reading_list.BUILTIN_LABELS, "Reread", "Later",
+        reading_list.MANAGE_LABELS_COMMAND,
+    ]
+    assert view.move_menu.values == [
+        "Move to", "Clear label", *reading_list.BUILTIN_LABELS, "Reread", "Later",
+    ]
+    assert chosen == ["All"]
+
+
+def test_manage_labels_keeps_the_current_filter():
+    from src import reading_list
+
+    opened = []
+    chosen = []
+    view = SimpleNamespace(
+        label_filter="Reading",
+        label_filter_var=SimpleNamespace(set=lambda value: chosen.append(value)),
+        _library_jobs=queue.Queue(),
+        _open_label_manager=lambda: opened.append(view),
+    )
+    PiaScrapGUI.on_label_filter_changed(view, reading_list.MANAGE_LABELS_COMMAND)
+    assert opened == [view]
+    assert view.label_filter == "Reading"
+    assert chosen == ["Reading"]
+    assert view._library_jobs.empty()
+
+
+def test_custom_label_jobs_save_rename_and_delete(tmp_path):
+    from src import reading_list
+
+    view = SimpleNamespace(gui_queue=queue.Queue())
+    PiaScrapGUI._library_edit(view, "add_label", str(tmp_path), [], "Reread")
+    assert view.gui_queue.get_nowait()[1] == (
+        "add_label", str(tmp_path), {}, [*reading_list.BUILTIN_LABELS, "Reread"],
+    )
+    PiaScrapGUI._library_edit(view, "labels", str(tmp_path), ["Book"], "Reread")
+    PiaScrapGUI._library_edit(view, "labels", str(tmp_path), ["Book"], "")
+    assert reading_list.read_labels(str(tmp_path)) == {}
+    assert reading_list.custom_labels(str(tmp_path)) == [*reading_list.BUILTIN_LABELS, "Reread"]
+    PiaScrapGUI._library_edit(view, "rename_label", str(tmp_path), [], ("Reread", "Later"))
+    assert reading_list.custom_labels(str(tmp_path)) == [*reading_list.BUILTIN_LABELS, "Later"]
+    PiaScrapGUI._library_edit(view, "delete_label", str(tmp_path), [], "Later")
+    assert reading_list.read_labels(str(tmp_path)) == {}
+    assert reading_list.custom_labels(str(tmp_path)) == list(reading_list.BUILTIN_LABELS)
+
+
+def test_renamed_label_stays_selected_in_the_filter(tmp_path):
+    view = SimpleNamespace(
+        output_entry=Widget(str(tmp_path)),
+        label_filter="Reread",
+        _label_map={"Book": "Reread"},
+        _custom_labels=["Reread"],
+        _labels_unreadable=False,
+        gui_queue=queue.Queue(),
+        after=lambda *_args: None,
+        process_queue=lambda: None,
+        applied=[],
+    )
+    view._custom_label_names = PiaScrapGUI._custom_label_names.__get__(view)
+    view._filter_values = PiaScrapGUI._filter_values.__get__(view)
+    view._apply_library_query = lambda reset_page: view.applied.append(view.label_filter)
+    view._fill_label_manager = lambda: None
+    view.gui_queue.put(("library_edit_done", (
+        "rename_label", str(tmp_path), {"Book": "Later"}, ["Later"],
+    )))
+    PiaScrapGUI.process_queue(view)
+    assert view.label_filter == "Later"
+    assert view.applied == ["Later"]
