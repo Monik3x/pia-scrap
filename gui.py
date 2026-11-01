@@ -803,9 +803,11 @@ class PiaScrapGUI(ctk.CTk):
         folder = row["folder"]
         selected = self.library_tree.selection()
         touched = None
+        arrived = False
         for row_id, info in self._page_rows.items():
             if info.get("folder") != folder:
                 continue
+            arrived = not info.get("progress_idx")
             info.update(self._page_row_info(row))
             self.library_tree.item(
                 row_id, values=self._library_values(row, self._label_map)
@@ -815,7 +817,7 @@ class PiaScrapGUI(ctk.CTk):
         if touched is None or touched not in selected:
             return
         progress_idx = row.get("progress_idx")
-        if len(selected) == 1 and progress_idx and not self.chapter_entry.get().strip():
+        if len(selected) == 1 and arrived and progress_idx and not self.chapter_entry.get().strip():
             self.chapter_entry.insert(0, str(progress_idx))
         self._update_library_actions()
 
@@ -999,7 +1001,7 @@ class PiaScrapGUI(ctk.CTk):
             window.focus()
             return
         window = ctk.CTkToplevel(self)
-        window.title("Custom labels")
+        window.title("Manage labels")
         window.geometry("420x360")
         window.minsize(360, 240)
         window.transient(self)

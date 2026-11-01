@@ -263,6 +263,18 @@ def test_arriving_row_fills_empty_chapter_box_only_for_the_sole_selection(tmp_pa
     assert view.chapter_entry.get() == ""
 
 
+def test_cleared_chapter_box_stays_empty_when_the_same_row_updates(tmp_path):
+    view = library_view(tmp_path)
+    view.display_current_page()
+    view.library_tree.selection_set(["row-0"])
+    view._on_library_select()
+    book = _loaded_row("Book", "4")
+    view._apply_library_row(view._library_generation, book)
+    view.chapter_entry.delete(0, "end")
+    view._apply_library_row(view._library_generation, dict(book, progress_idx="5"))
+    assert view.chapter_entry.get() == ""
+
+
 def test_set_disabled_until_chapter_data_is_loaded(tmp_path):
     folder = tmp_path / "Book"
     folder.mkdir()
